@@ -1,0 +1,722 @@
+================================================================================
+  CHAMELEON — ПЛАН РЕАЛИЗАЦИИ  (DRAFT v0.2)
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РАЗДЕЛ 1 — ПРАВКИ СУЩЕСТВУЮЩИХ СТРАНИЦ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  dkp_page.py
+────────────────
+Текущее состояние:
+  Колонки: ID | track_id | Тип системы | Статус | Направление | zone_mm
+  Поле ID генерируется как порядковый номер строки, не является уникальным
+  идентификатором. Отсутствует ключевое поле s_mm — продольная координата
+  датчика на пути.
+
+Необходимые изменения:
+
+  а) Переименовать колонку «ID» → «sensor_id».
+     Значение должно быть редактируемой строкой, уникальной в рамках проекта.
+     При добавлении строки генерировать дефолт «DKP_{N}», где N — rowCount+1,
+     но пользователь обязан иметь возможность изменить его.
+
+  б) Добавить колонку «s_mm» (продольная координата, мм).
+     Вставить её сразу после «track_id», чтобы итоговый порядок стал:
+       sensor_id | track_id | s_mm | Тип системы | Статус | Направление | zone_mm
+     Поле — редактируемый QTableWidgetItem, принимает только числа (мм).
+
+  в) Добавить валидацию s_mm при вводе или перед запуском симуляции:
+     Для каждой строки DKP получить длину соответствующего пути из PathsPage
+     по track_id. Если s_mm > длина пути или s_mm < 0 — подсветить ячейку
+     красным (setBackground) и блокировать старт симуляции.
+
+  г) Поле «Тип системы» (QComboBox) оставить как есть, но переименовать
+     пункты в «Fox» и «Mongoose» в соответствии со спецификацией.
+     Убрать «Релейная» и «Микропроцессорная» — они не описаны в ТЗ v0.2.
+
+  д) Поле «Статус» (QCheckBox) переименовать в «Включён» для ясности.
+     Checked = датчик активен, unchecked = выключен (события не генерируются).
+
+  е) Добавить кнопку «Удалить» в последнюю колонку (по аналогии с другими
+     страницами). Сейчас удаления строк нет вообще.
+
+  ж) Добавить методы to_dict() / from_dict() для JSON-сериализации (см. раздел 4).
+
+
+1.2  scenario_steps_dialog.py
+──────────────────────────────
+Текущее состояние:
+  Колонки: № | Начал. скорость | Ускорение | Порог скорости | Поведение | (удалить)
+  «Поведение» — QCheckBox (некорректно).
+  Отсутствует поле «Продолжительность».
+  Кнопка «Добавить сценарий» в диалоге — семантически неверное название.
+
+Необходимые изменения:
+
+  а) Добавить колонку «Продолжительность» между «№» и «Начал. скорость».
+     Итоговый порядок колонок:
+       № | Продолжительность | Нач. скорость | Ускорение | Порог скорости | Поведение | (удалить)
+
+     Поле «Продолжительность» принимает ввод в формате hh:mm:ss.
+     Для этого использовать QTimeEdit с отображением «hh:mm:ss».
+     Хранить внутри как целое число миллисекунд:
+       duration_ms = (h * 3600 + m * 60 + s) * 1000
+     При загрузке из dict конвертировать обратно через QTime.fromMSecsSinceStartOfDay().
+
+  б) Заменить QCheckBox в колонке «Поведение» на QComboBox со значениями:
+       LeftToRight — движение в сторону увеличения s_mm
+       RightToLeft — движение в сторону уменьшения s_mm
+       Stop        — удержание на месте (скорость → 0 на время шага)
+     При создании строки дефолтное значение — «LeftToRight».
+
+  в) Переименовать кнопку «Добавить сценарий» → «Добавить шаг».
+
+  г) Исправить баг с обработчиками удаления: текущая реализация
+     _create_delete_handler захватывает row по значению на момент создания,
+     но индексы строк сдвигаются после удаления. Правильный подход —
+     в обработчике определять текущий row кнопки динамически:
+       btn = self.sender()  # или через lambda с поиском виджета
+       for r in range(self.table.rowCount()):
+           if self.table.cellWidget(r, last_col) is btn:
+               self.table.removeRow(r)
+               self._renumber_steps()
+               break
+
+  д) Добавить методы to_dict() / from_dict() для JSON-сериализации (см. раздел 4).
+
+
+1.3  scenario_page.py
+──────────────────────
+Текущее состояние:
+  При нажатии на кнопку в колонке «№» открывается ScenarioStepsDialog.
+  После закрытия кнопка принимает текст выбранного номера шага — это
+  скорее всего отладочное поведение, не финальная логика.
+  Колонка «Кол-во шагов» не заполняется автоматически.
+  Колонка «Статус» (QCheckBox) — назначение не уточнено в ТЗ.
+
+Необходимые изменения:
+
+  а) После закрытия ScenarioStepsDialog с кодом Accepted:
+     — Получить полный список шагов (steps) из диалога через публичный метод
+       get_steps() → list[dict].
+     — Сохранить их в атрибут строки (например, dict в параллельном списке
+       self._scenario_data[row]).
+     — Обновить ячейку «Кол-во шагов» значением len(steps).
+     — Кнопку в колонке «№» сделать открывающей диалог повторно с уже
+       заполненными шагами (передавать существующие данные в конструктор
+       ScenarioStepsDialog через параметр initial_steps).
+
+  б) Добавить методы to_dict() / from_dict().
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РАЗДЕЛ 2 — ДВИЖОК СИМУЛЯЦИИ  (новый файл: simulation_engine.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  Структура файла и зависимости
+────────────────────────────────────
+Импорты:
+  from dataclasses import dataclass, field
+  from typing import List, Optional
+  from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+
+Файл не импортирует ни одну страницу UI напрямую — движок получает данные
+через структуры (dataclass) и общается с UI исключительно через Qt-сигналы.
+Это позволяет тестировать движок без запуска QApplication.
+
+
+2.2  Dataclass-модели конфигурации
+────────────────────────────────────
+Эти классы описывают состояние, переданное в движок перед стартом симуляции.
+Они же используются для JSON-сериализации (раздел 4).
+
+  @dataclass
+  class AxleDef:
+      """Описание одной оси вагона. Координата offset_mm — от передней торцевой
+      точки вагона вдоль направления движения."""
+      offset_mm: float
+
+  @dataclass
+  class WagonDef:
+      wagon_id: str
+      name: str
+      length_mm: float
+      axles: List[AxleDef]   # минимум 2 оси; порядок — от передней к задней
+
+  @dataclass
+  class TrainConfig:
+      train_id: str
+      track_id: str
+      s0_mm: float            # начальная продольная координата передней оси
+      direction: str          # 'LeftToRight' | 'RightToLeft'
+      wagons: List[WagonDef]  # порядок от головы состава к хвосту
+
+  @dataclass
+  class DKPConfig:
+      sensor_id: str
+      track_id: str
+      s_mm: float             # положение датчика вдоль пути
+      zone_mm: float          # полуширина зоны срабатывания
+      sensor_type: str        # 'Fox' | 'Mongoose'
+      enabled: bool
+      direction_filter: str   # 'Any' | 'LeftToRight' | 'RightToLeft'
+
+  @dataclass
+  class ScenarioStep:
+      duration_ms: int
+      v0_mms: float           # начальная скорость шага (мм/с)
+      accel_mms2: float       # ускорение (мм/с²)
+      v_threshold_mms: float  # порог скорости (мм/с); 0 = без ограничения
+      behavior: str           # 'LeftToRight' | 'RightToLeft' | 'Stop'
+
+  @dataclass
+  class SimConfig:
+      train: TrainConfig
+      dkps: List[DKPConfig]
+      steps: List[ScenarioStep]
+      dt_ms: int = 16         # шаг симуляции
+
+
+2.3  Dataclass состояния симуляции
+────────────────────────────────────
+  @dataclass
+  class AxisState:
+      wagon_index: int
+      axle_index: int
+      s_mm: float             # текущая продольная координата оси
+
+  @dataclass
+  class DKPEvent:
+      t_ms: int
+      sensor_id: str
+      wagon_index: int
+      axle_index: int
+      direction: str          # направление прохода
+
+  @dataclass
+  class SimState:
+      t_ms: int               # текущее время симуляции
+      step_index: int         # текущий шаг сценария
+      v_mms: float            # текущая скорость состава
+      s_head_mm: float        # координата передней оси
+      axes: List[AxisState]   # актуальные координаты всех осей
+      running: bool
+      paused: bool
+
+
+2.4  Класс SimulationEngine
+────────────────────────────
+  class SimulationEngine(QObject):
+
+      # Сигналы
+      tick_updated   = pyqtSignal(object)   # payload: SimState
+      dkp_triggered  = pyqtSignal(object)   # payload: DKPEvent
+      step_changed   = pyqtSignal(int)      # payload: новый step_index
+      sim_finished   = pyqtSignal()
+
+      def __init__(self, config: SimConfig, parent=None):
+          ...
+          self._timer = QTimer(self)
+          self._timer.setInterval(config.dt_ms)
+          self._timer.timeout.connect(self._tick)
+
+      # Публичный API
+      def start(self)  → запускает _timer, сбрасывает состояние
+      def pause(self)  → останавливает _timer без сброса
+      def resume(self) → снова запускает _timer
+      def stop(self)   → останавливает _timer, сбрасывает состояние
+      def get_state(self) → SimState  (снимок текущего состояния)
+      def get_event_log(self) → List[DKPEvent]  (все события за прогон)
+
+
+2.5  Внутренний метод _tick()
+──────────────────────────────
+Вызывается каждые dt_ms миллисекунд. Алгоритм:
+
+  Шаг А — Определить текущий ScenarioStep:
+    Если step_index >= len(steps) → emit sim_finished(), остановить таймер.
+    current_step = steps[step_index]
+
+  Шаг Б — Применить кинематику:
+    Если behavior == 'Stop':
+      v = 0
+    Иначе:
+      Знак ускорения: sign = +1 (LeftToRight) или -1 (RightToLeft)
+      v_new = v + sign * accel * dt_s
+      Если v_threshold > 0:
+        v_new = min(abs(v_new), v_threshold) * sign
+      v = v_new
+
+  Шаг В — Вычислить новую координату головы:
+    s_head_new = s_head + v * dt_s
+
+  Шаг Г — Обновить координаты всех осей:
+    Для каждого вагона i и каждой оси j:
+      Смещение оси от головы состава вычисляется как сумма длин всех предыдущих
+      вагонов плюс offset_mm внутри текущего вагона.
+      s_axis = s_head_new - total_offset_mm  (или + для RightToLeft)
+    Сохранить предыдущие координаты (s_prev) перед обновлением.
+
+  Шаг Д — Проверить срабатывание ДКП:
+    Для каждого датчика d из config.dkps:
+      Если not d.enabled → пропустить.
+      zone_lo = d.s_mm - d.zone_mm / 2
+      zone_hi = d.s_mm + d.zone_mm / 2
+      Для каждой оси (i, j):
+        s_prev = предыдущая координата оси
+        s_curr = новая координата оси
+        Пересечение: интервал [min(s_prev, s_curr), max(s_prev, s_curr)]
+          перекрывается с [zone_lo, zone_hi]?
+        Если да — определить направление прохода:
+          direction = 'LeftToRight' если s_curr > s_prev, иначе 'RightToLeft'
+        Применить direction_filter: если filter != 'Any' и не совпадает → пропустить.
+        Создать DKPEvent, добавить в лог, emit dkp_triggered(event).
+
+  Шаг Е — Обновить время шага и переключить при необходимости:
+    step_elapsed_ms += dt_ms
+    Если step_elapsed_ms >= current_step.duration_ms:
+      step_elapsed_ms = 0
+      step_index += 1
+      emit step_changed(step_index)
+      При переходе инициализировать v из v0 нового шага.
+
+  Шаг Ж — Обновить SimState, emit tick_updated(state).
+
+
+2.6  Граничные условия и валидация
+────────────────────────────────────
+Перед вызовом start() движок выполняет validate() → List[str] (список ошибок):
+  — Каждый DKP с track_id должен существовать в списке путей.
+  — s_mm каждого DKP должно быть в пределах [0, длина пути].
+  — Состав должен содержать хотя бы один вагон с хотя бы двумя осями.
+  — Список шагов сценария не должен быть пустым.
+  — s0_mm не должно быть отрицательным или превышать длину начального пути.
+Если validate() возвращает непустой список — start() бросает ValueError
+с объединённым сообщением, UI перехватывает и показывает QMessageBox.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РАЗДЕЛ 3 — ЭКРАН 3D-СЦЕНЫ  (новый файл: scene_window.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  Решение по рендереру
+──────────────────────────
+Рекомендуется VisPy (pip install vispy).
+Причины:
+  — Предоставляет VisPy SceneCanvas, который является нативным QWidget.
+  — Встроенная TurntableCamera для orbit-навигации мышью без дополнительного кода.
+  — Готовые визуальные примитивы: Line, Box, Sphere, Text, Markers.
+  — Рендеринг в offscreen-буфер через canvas.render() — нужно для MP4.
+
+Альтернатива — pyqtgraph GLViewWidget, если VisPy создаёт проблемы с зависимостями.
+
+
+3.2  Архитектура SceneWindow
+─────────────────────────────
+SceneWindow наследует QMainWindow (отдельное окно, не вкладка).
+
+  class SceneWindow(QMainWindow):
+      def __init__(self, engine: SimulationEngine, sim_config: SimConfig,
+                   path_data: List[dict], parent=None):
+          ...
+
+Конструктор принимает готовый движок и данные путей/ДКП/состава.
+SceneWindow не читает напрямую из виджетов страниц — только из структур.
+
+Layout SceneWindow:
+  ┌──────────────────────────────────────────────────────────────┐
+  │  toolbar: [▶ Пуск] [⏸ Пауза] [⏹ Стоп]  │  шаг: 1/5        │
+  │  [скорость: 0 мм/с · 0.0 км/ч]  [время: 00:00.000]         │
+  ├──────────────────────────────────────────────────────────────┤
+  │                                                              │
+  │              VisPy SceneCanvas (центральный виджет)         │
+  │                                                              │
+  └──────────────────────────────────────────────────────────────┘
+
+Toolbar реализуется через QToolBar (addToolBar).
+Текстовые индикаторы — QLabel в том же toolbar.
+
+
+3.3  Инициализация сцены
+─────────────────────────
+При создании SceneWindow выполняются:
+
+  а) Создать vispy.scene.SceneCanvas(keys='interactive', show=False).
+     Получить view = canvas.central_widget.add_view().
+     Установить view.camera = 'turntable' (orbit мышью, zoom колёсиком).
+
+  б) Нарисовать пути:
+     Для каждого пути из path_data:
+       Создать vispy.scene.visuals.Line(
+           pos=[[x1,y1,z1], [x2,y2,z2]],
+           color=(0.4, 0.6, 0.9, 1.0),
+           width=3,
+           parent=view.scene
+       )
+       Подписать: vispy.scene.visuals.Text(
+           text=track_id, pos=[(x1+x2)/2, (y1+y2)/2, (z1+z2)/2],
+           font_size=10, parent=view.scene
+       )
+
+  в) Нарисовать ДКП:
+     Для каждого DKPConfig:
+       Вычислить 3D-позицию: интерполировать точку на пути по s_mm.
+         Для прямолинейного пути: pos = start + (s_mm / length) * (end - start)
+       Создать vispy.scene.visuals.Markers(pos=[pos], size=12, ...).
+       Сохранить ссылку в dict self._dkp_visuals[sensor_id] для последующей
+       подсветки.
+
+  г) Создать визуальные объекты для вагонов:
+     Для каждого вагона — vispy.scene.visuals.Box(...) или набор из Lines.
+     Сохранить в self._wagon_visuals[wagon_index].
+     Позиции будут обновляться в _on_tick().
+
+  д) Установить камеру так, чтобы вся сцена была видна:
+     view.camera.set_range() после добавления всех объектов.
+
+
+3.4  Подключение к движку
+──────────────────────────
+После создания движка подключить сигналы:
+
+  engine.tick_updated.connect(self._on_tick)
+  engine.dkp_triggered.connect(self._on_dkp_triggered)
+  engine.step_changed.connect(self._on_step_changed)
+  engine.sim_finished.connect(self._on_sim_finished)
+
+  def _on_tick(self, state: SimState):
+      # Обновить позиции вагонов и осей в сцене
+      for i, wagon in enumerate(state.axes_by_wagon):
+          # Вычислить 3D-позицию по s_mm через интерполяцию пути
+          pos3d = self._s_to_xyz(wagon.s_mm, state.track_id)
+          self._wagon_visuals[i].transform.translate = pos3d
+      # Обновить HUD
+      kmh = state.v_mms * 3.6 / 1000
+      self._speed_label.setText(f"{state.v_mms:.0f} мм/с · {kmh:.1f} км/ч")
+      self._clock_label.setText(self._fmt_time(state.t_ms))
+      canvas.update()
+
+  def _on_dkp_triggered(self, event: DKPEvent):
+      marker = self._dkp_visuals.get(event.sensor_id)
+      if marker:
+          marker.set_data(face_color=(1.0, 0.65, 0.0, 1.0))  # amber
+          # Сбросить цвет через 200 мс
+          QTimer.singleShot(200, lambda: marker.set_data(face_color=normal_color))
+
+  def _on_step_changed(self, idx: int):
+      self._step_label.setText(f"Шаг: {idx+1}/{len(self._steps)}")
+
+  def _on_sim_finished(self):
+      self._btn_start.setEnabled(True)
+      self._btn_pause.setEnabled(False)
+      self._btn_stop.setEnabled(False)
+
+
+3.5  Кнопки управления
+───────────────────────
+  _btn_start.clicked → проверить engine.validate(), показать ошибки если есть,
+                        иначе engine.start(); переключить состояние кнопок.
+  _btn_pause.clicked → engine.pause() / engine.resume() (кнопка-тоггл).
+  _btn_stop.clicked  → engine.stop(); сбросить HUD.
+
+Состояния кнопок:
+  Idle:    [▶ Пуск: enabled] [⏸ Пауза: disabled] [⏹ Стоп: disabled]
+  Running: [▶ Пуск: disabled] [⏸ Пауза: enabled] [⏹ Стоп: enabled]
+  Paused:  [▶ Пуск: disabled] [▶ Продолжить: enabled] [⏹ Стоп: enabled]
+  Done:    [▶ Пуск: enabled] [⏸ Пауза: disabled] [⏹ Стоп: disabled]
+
+
+3.6  Открытие SceneWindow из главного окна
+───────────────────────────────────────────
+SceneWindow — отдельное окно, не вкладка в QStackedWidget.
+Добавить в MainWindow новую кнопку «Симуляция» на панель кнопок.
+
+  def on_simulation_clicked(self):
+      # 1. Собрать конфигурацию из всех страниц
+      try:
+          sim_config = self._build_sim_config()
+          path_data  = self._collect_path_data()
+      except ValueError as e:
+          QMessageBox.critical(self, "Ошибка конфигурации", str(e))
+          return
+
+      # 2. Создать движок
+      engine = SimulationEngine(sim_config)
+
+      # 3. Создать и показать окно сцены
+      self._scene_window = SceneWindow(engine, sim_config, path_data, parent=self)
+      self._scene_window.show()
+      # Хранить ссылку в self._scene_window, иначе окно будет GC'd
+
+  def _build_sim_config(self) -> SimConfig:
+      # Читает данные из self.paths_page, self.dkp_page,
+      # self.sostav_page, self.scenario_page и собирает SimConfig.
+      # Бросает ValueError если чего-то не хватает.
+      ...
+
+  def _collect_path_data(self) -> List[dict]:
+      # Возвращает список путей в виде словарей для рендерера.
+      ...
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РАЗДЕЛ 4 — JSON-СЕРИАЛИЗАЦИЯ  (новый файл: project_io.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  Структура файла проекта
+─────────────────────────────
+Файл сохраняется как *.chameleon.json (UTF-8, indent=2).
+Верхний уровень:
+
+  {
+    "version": "0.2",
+    "paths": [ <PathRecord>, ... ],
+    "dkps":  [ <DKPRecord>, ... ],
+    "wagons": [ <WagonRecord>, ... ],
+    "train":  <TrainRecord>,
+    "scenario": <ScenarioRecord>
+  }
+
+  PathRecord:
+  {
+    "track_id": "T1",
+    "name": "Главный путь",
+    "x1": 0.0, "y1": 0.0, "z1": 0.0,
+    "x2": 50000.0, "y2": 0.0, "z2": 0.0
+  }
+  (length_mm не хранится — вычисляется при загрузке как sqrt-расстояние)
+
+  DKPRecord:
+  {
+    "sensor_id": "DKP_1",
+    "track_id": "T1",
+    "s_mm": 12000.0,
+    "sensor_type": "Fox",
+    "enabled": true,
+    "direction_filter": "Any",
+    "zone_mm": 100.0
+  }
+
+  WagonRecord:
+  {
+    "wagon_id": "W_ER200_M",
+    "name": "Моторный вагон ЭР200",
+    "wagon_type": "motor",
+    "length_mm": 24500.0,
+    "height_mm": 4250.0,
+    "bogie_base_mm": 18000.0,
+    "axles": [
+      { "offset_mm": 1500.0 },
+      { "offset_mm": 7500.0 },
+      { "offset_mm": 17000.0 },
+      { "offset_mm": 23000.0 }
+    ],
+    "model_path": "assets/er200_motor.glb"
+  }
+
+  TrainRecord:
+  {
+    "train_id": "TRAIN_1",
+    "track_id": "T1",
+    "s0_mm": 0.0,
+    "direction": "LeftToRight",
+    "wagon_sequence": [
+      { "wagon_id": "W_ER200_M", "count": 1, "reversed": false },
+      { "wagon_id": "W_ER200_T", "count": 2, "reversed": false }
+    ]
+  }
+
+  ScenarioRecord:
+  {
+    "scenario_id": "SC_1",
+    "name": "Разгон и торможение",
+    "steps": [
+      {
+        "duration_ms": 30000,
+        "v0_mms": 0.0,
+        "accel_mms2": 500.0,
+        "v_threshold_mms": 14000.0,
+        "behavior": "LeftToRight"
+      },
+      {
+        "duration_ms": 60000,
+        "v0_mms": 14000.0,
+        "accel_mms2": 0.0,
+        "v_threshold_mms": 14000.0,
+        "behavior": "LeftToRight"
+      },
+      {
+        "duration_ms": 20000,
+        "v0_mms": 14000.0,
+        "accel_mms2": -700.0,
+        "v_threshold_mms": 0.0,
+        "behavior": "Stop"
+      }
+    ]
+  }
+
+
+4.2  Методы to_dict() / from_dict() на страницах UI
+─────────────────────────────────────────────────────
+Каждая страница реализует два метода:
+
+  PathsPage.to_dict() → List[dict]
+    Итерирует строки таблицы, возвращает список PathRecord.
+
+  PathsPage.from_dict(data: List[dict])
+    Очищает таблицу, добавляет строки из data.
+
+  DkpPage.to_dict() → List[dict]
+  DkpPage.from_dict(data: List[dict])
+
+  SostavPage.to_dict() → dict   (TrainRecord + список WagonRecord)
+  SostavPage.from_dict(data: dict)
+
+  ScenarioPage.to_dict() → List[dict]   (список ScenarioRecord)
+  ScenarioPage.from_dict(data: List[dict])
+
+  ScenarioStepsDialog.get_steps() → List[dict]   (для ScenarioPage)
+  ScenarioStepsDialog.set_steps(steps: List[dict])  (для редактирования)
+
+
+4.3  Класс ProjectIO
+─────────────────────
+  class ProjectIO:
+
+      @staticmethod
+      def save(path: str, pages: dict) -> None:
+          """
+          pages = {
+              'paths':    paths_page,
+              'dkps':     dkp_page,
+              'sostav':   sostav_page,
+              'scenario': scenario_page,
+          }
+          Собирает to_dict() со всех страниц, формирует финальный dict,
+          сериализует в JSON с indent=2, пишет в файл UTF-8.
+          """
+
+      @staticmethod
+      def load(path: str) -> dict:
+          """
+          Читает файл, проверяет version, возвращает dict с ключами
+          paths, dkps, wagons, train, scenario.
+          Бросает ValueError если версия не поддерживается или структура
+          нарушена.
+          """
+
+      @staticmethod
+      def validate_structure(data: dict) -> List[str]:
+          """
+          Проверяет целостность загруженных данных:
+          — Все track_id в DKP присутствуют в paths.
+          — s_mm каждого DKP ≤ длина соответствующего пути.
+          — wagon_id в train.wagon_sequence присутствуют в wagons.
+          Возвращает список строк с описанием ошибок (пустой = OK).
+          """
+
+
+4.4  Интеграция в MainWindow
+─────────────────────────────
+Добавить QMenuBar с меню «Файл»:
+
+  File → Новый проект     (Ctrl+N)  — очистить все страницы
+  File → Открыть...       (Ctrl+O)  — QFileDialog → ProjectIO.load() →
+                                       from_dict() на каждую страницу
+  File → Сохранить        (Ctrl+S)  — сохранить в self._current_file
+  File → Сохранить как... (Ctrl+Shift+S) — QFileDialog → ProjectIO.save()
+
+  self._current_file: Optional[str] = None  — хранит путь к открытому файлу.
+  При Ctrl+S если _current_file is None — вызвать «Сохранить как».
+
+  Заголовок окна обновляется: "Хамелеон — {basename}" при открытом файле.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РАЗДЕЛ 5 — ГЕНЕРАЦИЯ ВЫХОДНЫХ ДАННЫХ  (новый файл: output_writer.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Fox и Mongoose логи (JSON, формат ARSCIS)
+───────────────────────────────────────────────
+Вызывается после завершения симуляции, принимает engine.get_event_log().
+
+  def write_fox_log(events: List[DKPEvent], path: str) -> None
+  def write_mongoose_log(events: List[DKPEvent], path: str) -> None
+
+Fox-запись на одно срабатывание:
+  {
+    "sensor_id": "DKP_1",
+    "t_ms": 12450,
+    "axis_index": 3,
+    "direction": "LeftToRight",
+    "s_mm": 12000.0,
+    "v_mms": 13800.0
+  }
+
+Mongoose отличается профилем сигнала (уточнить по ARSCIS-спецификации),
+структура записи аналогична, добавляется поле "signal_profile": "mongoose".
+
+
+5.2  SNR-лог (.snr.json)
+─────────────────────────
+  def write_snr_log(events: List[DKPEvent], sim_config: SimConfig,
+                    path: str) -> None
+
+  {
+    "axes_decisions": [
+      {
+        "sensor_id": "DKP_1",
+        "axis_events": [
+          { "t_ms": 12450, "axis_index": 3, "snr_db": 24.5,
+            "decision": "pass" }
+        ]
+      }
+    ]
+  }
+
+
+5.3  MP4 + Timeline
+─────────────────────
+  def write_mp4(canvas: vispy.app.Canvas, engine: SimulationEngine,
+                out_path: str, fps: int = 30) -> None
+
+Алгоритм:
+  — Запустить ffmpeg как subprocess с параметрами:
+      ffmpeg -y -f rawvideo -vcodec rawvideo -s WxH -pix_fmt rgb24
+             -r {fps} -i pipe:0 -vcodec libx264 -pix_fmt yuv420p {out_path}
+  — Прогнать симуляцию заново (отдельный экземпляр SimulationEngine)
+    с шагом dt_ms = 1000/fps (≈33 мс для 30 fps).
+  — На каждом шаге: обновить сцену, canvas.render() → numpy array,
+    записать bytes в stdin ffmpeg.
+  — По завершении закрыть stdin ffmpeg, дождаться process.wait().
+
+Timeline-файл ({out_path}.timeline.json):
+  {
+    "fps": 30,
+    "events": [
+      { "frame": 372, "t_ms": 12400, "type": "dkp_triggered",
+        "sensor_id": "DKP_1", "axis_index": 3 },
+      { "frame": 900, "t_ms": 30000, "type": "step_changed",
+        "step_index": 1 }
+    ]
+  }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ПОРЯДОК РЕАЛИЗАЦИИ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Правки dkp_page.py, scenario_steps_dialog.py, scenario_page.py (Раздел 1).
+  2. Dataclass-модели в simulation_engine.py — без логики таймера (Раздел 2.2–2.3).
+  3. project_io.py + to_dict/from_dict на всех страницах (Раздел 4).
+     Проверить: сохранить проект, открыть заново — данные совпадают.
+  4. Логика SimulationEngine._tick() (Раздел 2.4–2.6).
+     Проверить движок юнит-тестом без UI: подать конфиг, запустить tick
+     вручную в цикле, проверить координаты осей и события DKP.
+  5. scene_window.py с VisPy-рендером (Раздел 3).
+     Подключить к движку, проверить визуально.
+  6. Кнопка «Симуляция» в main_window.py + _build_sim_config() (Раздел 3.6).
+  7. output_writer.py: Fox/Mongoose → SNR → MP4 (Раздел 5).
+
+================================================================================
