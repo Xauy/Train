@@ -1,0 +1,176 @@
+# Хамелеон — Полная файловая структура проекта
+
+> **Стек:** PyQt6 · PyVista/VTK · NumPy · NetworkX · Pydantic v2 · JSON stdlib · PyInstaller · Python 3.11+ / Windows 10/11 x64
+
+---
+
+```
+project/
+│
+├── main.py
+│   └── <entry point>
+│       └── creates QApplication → MainWindow → window.show()
+│
+├── physics/
+│   └── models.py                          ← (simulation dataclasses — file not provided)
+│       └── presumed: WagonDef, DKPConfig, ScenarioStep  (referenced by other modules)
+│
+├── storage/
+│   ├── models.py                          ← project-level data containers
+│   │   ├── class PathRecord               (dataclass)
+│   │   │   ├── fields: track_id, name, x, z, length_mm
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → PathRecord
+│   │   │
+│   │   ├── class ScenarioRecord           (dataclass)
+│   │   │   ├── fields: name, active, steps: List[dict]
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → ScenarioRecord
+│   │   │
+│   │   └── class ProjectData              (dataclass)
+│   │       ├── fields: paths, sensors, wagons, scenarios, train
+│   │       ├── def to_dict() → dict
+│   │       ├── @classmethod from_dict(d) → ProjectData
+│   │       └── def path_lengths() → dict[str, float]
+│   │
+│   └── project_store.py                   ← JSON save / load (no Qt, no physics)
+│       └── class ProjectStore
+│           ├── ENCODING = "utf-8"
+│           ├── INDENT   = 2
+│           ├── @staticmethod save(data: ProjectData, path) → None
+│           └── @staticmethod load(path) → ProjectData
+│
+├── validation/
+│   └── validators.py                      ← pure validation, zero Qt dependency
+│       ├── @dataclass(frozen=True) ValidationError
+│       │   └── fields: row, field, message
+│       │
+│       ├── def validate_dkp_sensors(sensors, path_lengths) → List[ValidationError]
+│       │   └── rules: s_mm parseable & ≥ 0 & ≤ path length; zone_mm > 0
+│       │
+│       ├── def validate_paths(paths) → List[ValidationError]
+│       │   └── rules: track_id non-empty & unique; length_mm > 0
+│       │
+│       └── def validate_scenario_steps(steps) → List[ValidationError]
+│           └── rules: duration_ms ≥ 0; v_threshold_mms ≥ 0; behavior in allowed set
+│
+└── ui/
+    ├── main_window.py                     ← top-level window; owns ProjectData I/O
+    │   └── class MainWindow               (QMainWindow)
+    │       ├── __init__()                 builds nav buttons + QStackedWidget
+    │       ├── def _reset_nav_labels()
+    │       ├── def _on_dkp_clicked()      toggles DkpPage ↔ PathsPage
+    │       ├── def _on_sostav_clicked()   toggles SostavPage ↔ PathsPage
+    │       ├── def _on_scenario_clicked() toggles ScenarioPage ↔ PathsPage
+    │       ├── def _collect_project() → ProjectData
+    │       ├── def _apply_project(data: ProjectData)
+    │       ├── def _save_project()        QFileDialog → ProjectStore.save()
+    │       └── def _load_project()        QFileDialog → ProjectStore.load()
+    │
+    ├── pages/
+    │   ├── base_page.py                   ← abstract base for all editor pages
+    │   │   └── class BasePage             (QWidget, ABC)
+    │   │       ├── @abstractmethod to_dict() → list | dict
+    │   │       └── @abstractmethod from_dict(data)
+    │   │
+    │   ├── paths_page.py                  ← track / path definitions editor
+    │   │   └── class PathsPage            (BasePage)
+    │   │       ├── __init__()             QTableWidget (6 cols) + "Добавить путь"
+    │   │       ├── def add_row(record?)   insert row from PathRecord or blank
+    │   │       ├── def get_selected_path_length() → float
+    │   │       ├── def to_records() → list[PathRecord]
+    │   │       ├── def validate() → list[str]   (calls validate_paths + highlights)
+    │   │       ├── def to_dict() → list[dict]
+    │   │       ├── def from_dict(data)
+    │   │       ├── def _text(row, col) → str
+    │   │       ├── def _float(row, col) → float
+    │   │       └── def _apply_highlights(errors)
+    │   │
+    │   ├── dkp_page.py                    ← trackside DKP sensor editor
+    │   │   └── class DkpPage              (BasePage)
+    │   │       ├── __init__()             QTableWidget (8 cols) + "Добавить строку ДКП"
+    │   │       ├── def add_row(record?)   insert row with QComboBox + QCheckBox
+    │   │       ├── def validate(path_lengths) → list[str]
+    │   │       ├── def to_dict() → list[dict]
+    │   │       ├── def from_dict(data)
+    │   │       ├── def _delete_row()
+    │   │       ├── def _text(row, col) → str
+    │   │       ├── def _float(row, col) → float
+    │   │       └── def _apply_highlights(errors)
+    │   │
+    │   ├── sostav_page.py                 ← (file not provided)
+    │   │   └── class SostavPage           (BasePage — inferred)
+    │   │       ├── def set_length(length)
+    │   │       ├── def to_dict() → list[dict]
+    │   │       └── def from_dict(data)
+    │   │
+    │   └── scenario_page.py               ← simulation scenario manager
+    │       └── class ScenarioPage         (BasePage)
+    │           ├── __init__()             QTableWidget (5 cols) + _steps_data list
+    │           ├── def add_row(record?)   insert row + QCheckBox + open-dialog button
+    │           ├── def to_dict() → list[dict]
+    │           ├── def from_dict(data)
+    │           ├── def _to_records() → list[ScenarioRecord]
+    │           ├── def _open_steps_dialog()   opens ScenarioStepsDialog
+    │           ├── def _delete_row()
+    │           ├── def _find_row(widget, col) → int
+    │           └── def _text(row, col) → str
+    │
+    └── dialogs/
+        ├── scenario_steps_dialog.py       ← modal editor for one scenario's steps
+        │   └── class ScenarioStepsDialog  (QDialog)
+        │       ├── __init__(parent, initial_steps?)
+        │       ├── def get_steps() → list[dict]
+        │       ├── def set_steps(steps)
+        │       ├── def validate() → list[str]
+        │       ├── def _add_step()
+        │       ├── def _insert_row(*, duration_ms, v0, accel, threshold, behavior)
+        │       ├── def _delete_step()
+        │       ├── def _renumber_steps()
+        │       ├── def _select_step()
+        │       └── def _float(row, col) → float
+        │
+        └── wagons_dialog.py               ← modal browser / selector for wagons
+            └── class WagonsDialog         (QDialog)
+                ├── __init__(parent?)
+                ├── def _add_wagon()
+                ├── def _delete_wagon()
+                └── def _select_wagon()    → sets selected_id, selected_name
+```
+
+---
+
+## Module dependency map
+
+```
+main.py
+  └─→ ui.main_window.MainWindow
+        ├─→ storage.models           (PathRecord, ScenarioRecord, ProjectData)
+        ├─→ storage.project_store    (ProjectStore)
+        ├─→ ui.pages.paths_page      (PathsPage)
+        ├─→ ui.pages.dkp_page        (DkpPage)
+        ├─→ ui.pages.sostav_page     (SostavPage)
+        └─→ ui.pages.scenario_page   (ScenarioPage)
+              └─→ ui.dialogs.scenario_steps_dialog (ScenarioStepsDialog)
+                    └─→ validation.validators
+
+ui.pages.dkp_page
+  └─→ validation.validators  (validate_dkp_sensors)
+
+ui.pages.paths_page
+  └─→ validation.validators  (validate_paths)
+
+storage.project_store
+  └─→ storage.models
+
+ui.dialogs.wagons_dialog      (no external project imports)
+```
+
+---
+
+## Notes on missing / external files
+
+| File | Status | Referenced from |
+|---|---|---|
+| `physics/models.py` | **Not provided** | `storage/models.py` docstring mentions `WagonDef`, `DKPConfig`, `ScenarioStep` |
+| `ui/pages/sostav_page.py` | **Not provided** | `ui/main_window.py` imports `SostavPage`; `set_length()` and `to/from_dict()` called on it |
