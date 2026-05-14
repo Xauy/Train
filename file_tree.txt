@@ -13,32 +13,78 @@ project/
 │
 ├── physics/
 │   └── models.py                          ← (simulation dataclasses — file not provided)
-│       └── presumed: WagonDef, DKPConfig, ScenarioStep  (referenced by other modules)
+│       └── NOTE: WagonDef / DKPConfig / ScenarioStep previously presumed here;
+│               storage-layer equivalents are now defined in storage/models.py (v0.2)
 │
 ├── storage/
-│   ├── models.py                          ← project-level data containers
-│   │   ├── class PathRecord               (dataclass)
-│   │   │   ├── fields: track_id, name, x, z, length_mm
+│   ├── models.py                          ← project-level data containers  [UPDATED v0.2]
+│   │   │
+│   │   ├── class AxleDef                  (dataclass)          ← NEW
+│   │   │   ├── fields: offset_mm: float
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → AxleDef
+│   │   │
+│   │   ├── class WagonSequenceEntry       (dataclass)          ← NEW
+│   │   │   ├── fields: wagon_id, count, reversed
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → WagonSequenceEntry
+│   │   │
+│   │   ├── class ScenarioStep             (dataclass)          ← NEW
+│   │   │   ├── fields: duration_ms, v0_mms, accel_mms2,
+│   │   │   │           v_threshold_mms, behavior
+│   │   │   ├── ALLOWED_BEHAVIORS = {'LeftToRight','RightToLeft','Stop'}
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → ScenarioStep
+│   │   │
+│   │   ├── class PathRecord               (dataclass)          ← UPDATED
+│   │   │   ├── fields: track_id, name,
+│   │   │   │           x1, y1, z1, x2, y2, z2                 (was: x, z, length_mm)
+│   │   │   ├── @property length_mm → float                    (computed; not stored)
 │   │   │   ├── def to_dict() → dict
 │   │   │   └── @classmethod from_dict(d) → PathRecord
 │   │   │
-│   │   ├── class ScenarioRecord           (dataclass)
-│   │   │   ├── fields: name, active, steps: List[dict]
+│   │   ├── class DKPRecord                (dataclass)          ← NEW
+│   │   │   ├── fields: sensor_id, track_id, s_mm, sensor_type,
+│   │   │   │           enabled, direction_filter, zone_mm
+│   │   │   ├── SENSOR_TYPES      = {'Fox', 'Mongoose'}
+│   │   │   ├── DIRECTION_FILTERS = {'Any','LeftToRight','RightToLeft'}
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → DKPRecord
+│   │   │
+│   │   ├── class WagonRecord              (dataclass)          ← NEW
+│   │   │   ├── fields: wagon_id, name, wagon_type, length_mm, height_mm,
+│   │   │   │           bogie_base_mm, axles: List[AxleDef], model_path
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → WagonRecord
+│   │   │
+│   │   ├── class TrainRecord              (dataclass)          ← NEW
+│   │   │   ├── fields: train_id, track_id, s0_mm, direction,
+│   │   │   │           wagon_sequence: List[WagonSequenceEntry]
+│   │   │   ├── def to_dict() → dict
+│   │   │   └── @classmethod from_dict(d) → TrainRecord
+│   │   │
+│   │   ├── class ScenarioRecord           (dataclass)          ← UPDATED
+│   │   │   ├── fields: scenario_id, name, steps: List[ScenarioStep]
+│   │   │   │           (was: name, active, steps: List[dict])
 │   │   │   ├── def to_dict() → dict
 │   │   │   └── @classmethod from_dict(d) → ScenarioRecord
 │   │   │
-│   │   └── class ProjectData              (dataclass)
-│   │       ├── fields: paths, sensors, wagons, scenarios, train
+│   │   └── class ProjectData              (dataclass)          ← UPDATED
+│   │       ├── fields: version, paths, dkps, wagons, train, scenario
+│   │       │           (was: paths, sensors, wagons, scenarios, train)
 │   │       ├── def to_dict() → dict
 │   │       ├── @classmethod from_dict(d) → ProjectData
 │   │       └── def path_lengths() → dict[str, float]
 │   │
-│   └── project_store.py                   ← JSON save / load (no Qt, no physics)
+│   └── project_store.py                   ← JSON save / load  [UPDATED v0.2]
 │       └── class ProjectStore
-│           ├── ENCODING = "utf-8"
-│           ├── INDENT   = 2
+│           ├── ENCODING           = "utf-8"
+│           ├── INDENT             = 2
+│           ├── EXTENSION          = ".chameleon.json"          ← NEW
+│           ├── SUPPORTED_VERSIONS = frozenset({"0.2"})         ← NEW
 │           ├── @staticmethod save(data: ProjectData, path) → None
-│           └── @staticmethod load(path) → ProjectData
+│           ├── @staticmethod load(path) → ProjectData
+│           └── @staticmethod _migrate(data, from_version) → dict  ← NEW
 │
 ├── validation/
 │   └── validators.py                      ← pure validation, zero Qt dependency
@@ -101,7 +147,7 @@ project/
     │   ├── sostav_page.py                 ← (file not provided)
     │   │   └── class SostavPage           (BasePage — inferred)
     │   │       ├── def set_length(length)
-    │   │       ├── def to_dict() → list[dict]
+    │   │       ├── def to_dict() → dict   {'wagons': [...], 'train': {...}}
     │   │       └── def from_dict(data)
     │   │
     │   └── scenario_page.py               ← simulation scenario manager
@@ -145,7 +191,8 @@ project/
 ```
 main.py
   └─→ ui.main_window.MainWindow
-        ├─→ storage.models           (PathRecord, ScenarioRecord, ProjectData)
+        ├─→ storage.models           (PathRecord, DKPRecord, WagonRecord,
+        │                             TrainRecord, ScenarioRecord, ProjectData)
         ├─→ storage.project_store    (ProjectStore)
         ├─→ ui.pages.paths_page      (PathsPage)
         ├─→ ui.pages.dkp_page        (DkpPage)
@@ -161,10 +208,34 @@ ui.pages.paths_page
   └─→ validation.validators  (validate_paths)
 
 storage.project_store
-  └─→ storage.models
+  └─→ storage.models          (ProjectData + all sub-records)
 
 ui.dialogs.wagons_dialog      (no external project imports)
 ```
+
+---
+
+## *.chameleon.json — структура файла проекта (v0.2)
+
+```json
+{
+  "version": "0.2",
+  "paths":   [ <PathRecord>,     ... ],
+  "dkps":    [ <DKPRecord>,      ... ],
+  "wagons":  [ <WagonRecord>,    ... ],
+  "train":     <TrainRecord>,
+  "scenario":  <ScenarioRecord>
+}
+```
+
+| Запись | Ключевые поля |
+|---|---|
+| `PathRecord` | `track_id`, `name`, `x1/y1/z1`, `x2/y2/z2` *(length_mm вычисляется)* |
+| `DKPRecord` | `sensor_id`, `track_id`, `s_mm`, `sensor_type`, `enabled`, `direction_filter`, `zone_mm` |
+| `WagonRecord` | `wagon_id`, `name`, `wagon_type`, `length_mm`, `height_mm`, `bogie_base_mm`, `axles[]`, `model_path` |
+| `TrainRecord` | `train_id`, `track_id`, `s0_mm`, `direction`, `wagon_sequence[]` |
+| `ScenarioRecord` | `scenario_id`, `name`, `steps[]` |
+| `ScenarioStep` | `duration_ms`, `v0_mms`, `accel_mms2`, `v_threshold_mms`, `behavior` |
 
 ---
 
@@ -172,5 +243,5 @@ ui.dialogs.wagons_dialog      (no external project imports)
 
 | File | Status | Referenced from |
 |---|---|---|
-| `physics/models.py` | **Not provided** | `storage/models.py` docstring mentions `WagonDef`, `DKPConfig`, `ScenarioStep` |
-| `ui/pages/sostav_page.py` | **Not provided** | `ui/main_window.py` imports `SostavPage`; `set_length()` and `to/from_dict()` called on it |
+| `physics/models.py` | **Not provided** | Storage-level equivalents (WagonRecord, DKPRecord, ScenarioStep) now live in `storage/models.py`; physics-specific runtime classes remain TBD |
+| `ui/pages/sostav_page.py` | **Not provided** | `ui/main_window.py` imports `SostavPage`; `set_length()` and `to/from_dict()` called on it; `to_dict()` must return `{'wagons': [...], 'train': {...}}` |

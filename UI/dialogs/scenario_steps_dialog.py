@@ -3,18 +3,19 @@ ui/dialogs/scenario_steps_dialog.py
 Modal dialog for editing the step list of one scenario.
 
 Returns step data as raw dicts compatible with
-physics.models.ScenarioStep.to_dict() / from_dict().
+storage.models.ScenarioStep.to_dict() / from_dict().
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTime
+from PyQt6.QtCore import Qt, QTime
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QComboBox, QMessageBox, QTimeEdit,
 )
 
+from storage.models import ScenarioStep
 from validation.validators import validate_scenario_steps
 
 # Column indices
@@ -79,13 +80,15 @@ class ScenarioStepsDialog(QDialog):
                 time_edit.time().msecsSinceStartOfDay() if time_edit else 0
             )
             behavior_combo = self.table.cellWidget(row, _COL_BEHAVIOR)
-            steps.append({
-                "duration_ms":     duration_ms,
-                "v0_mms":          self._float(row, _COL_V0),
-                "accel_mms2":      self._float(row, _COL_ACCEL),
-                "v_threshold_mms": self._float(row, _COL_THRESHOLD),
-                "behavior":        behavior_combo.currentText() if behavior_combo else "LeftToRight",
-            })
+            # Construct via ScenarioStep so field names and types are always
+            # consistent with storage.models, then serialise back to dict.
+            steps.append(ScenarioStep(
+                duration_ms=     duration_ms,
+                v0_mms=          self._float(row, _COL_V0),
+                accel_mms2=      self._float(row, _COL_ACCEL),
+                v_threshold_mms= self._float(row, _COL_THRESHOLD),
+                behavior=        behavior_combo.currentText() if behavior_combo else "LeftToRight",
+            ).to_dict())
         return steps
 
     def set_steps(self, steps: list[dict]) -> None:
@@ -119,7 +122,7 @@ class ScenarioStepsDialog(QDialog):
 
         # № — read-only
         num_item = QTableWidgetItem(str(row + 1))
-        num_item.setFlags(num_item.flags() & ~0x2)  # remove Editable flag
+        num_item.setFlags(num_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.table.setItem(row, _COL_NUM, num_item)
 
         # Duration — QTimeEdit hh:mm:ss
@@ -153,7 +156,9 @@ class ScenarioStepsDialog(QDialog):
 
     def _renumber_steps(self) -> None:
         for row in range(self.table.rowCount()):
-            self.table.setItem(row, _COL_NUM, QTableWidgetItem(str(row + 1)))
+            num_item = QTableWidgetItem(str(row + 1))
+            num_item.setFlags(num_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, _COL_NUM, num_item)
 
     def _select_step(self) -> None:
         current_row = self.table.currentRow()

@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
 )
 
-from storage.models import ScenarioRecord
+from storage.models import ScenarioRecord, ScenarioStep
 from ui.dialogs.scenario_steps_dialog import ScenarioStepsDialog
 from ui.pages.base_page import BasePage
 
@@ -54,9 +54,13 @@ class ScenarioPage(BasePage):
     def add_row(self, record: ScenarioRecord | None = None) -> None:
         """Insert a new row, optionally pre-filled from *record*."""
         row = self.table.rowCount()
-        r   = record or ScenarioRecord()
+        r   = record or ScenarioRecord(scenario_id=f"SC_{row + 1}", name="")
         self.table.insertRow(row)
-        self._steps_data.append(list(r.steps))
+
+        # _steps_data stores raw step dicts so ScenarioStepsDialog can
+        # consume them directly.  ScenarioRecord.steps is List[ScenarioStep],
+        # so convert to dicts here.
+        self._steps_data.append([s.to_dict() for s in r.steps])
 
         btn = QPushButton(str(row + 1))
         btn.clicked.connect(self._open_steps_dialog)
@@ -66,7 +70,6 @@ class ScenarioPage(BasePage):
         self.table.setItem(row, _COL_COUNT, QTableWidgetItem(str(len(r.steps))))
 
         chk = QCheckBox()
-        chk.setChecked(r.active)
         self.table.setCellWidget(row, _COL_STATUS, chk)
 
         del_btn = QPushButton("Удалить")
@@ -93,11 +96,10 @@ class ScenarioPage(BasePage):
     def _to_records(self) -> list[ScenarioRecord]:
         records = []
         for row in range(self.table.rowCount()):
-            chk = self.table.cellWidget(row, _COL_STATUS)
             records.append(ScenarioRecord(
-                name=   self._text(row, _COL_NAME),
-                active= chk.isChecked() if chk else False,
-                steps=  list(self._steps_data[row]),
+                scenario_id=f"SC_{row + 1}",
+                name=       self._text(row, _COL_NAME),
+                steps=      [ScenarioStep.from_dict(s) for s in self._steps_data[row]],
             ))
         return records
 
