@@ -1,0 +1,748 @@
+"""
+ui/scene_window.py
+Chameleon — 3D simulation scene window.
+
+Changes in this version:
+  [1] BOUNDARY STOP — if the head or tail of the train reaches the rail
+      endpoint (s ≤ 0 or s ≥ path length), the engine is paused and a
+      warning is shown.  Checked every tick in _check_boundary().
+
+  [2] WAGON VERTICAL OFFSET — wagon Box and axle Markers are rendered
+      at the correct Z-height: box centre = rail_z + half_height so the
+      bottom face sits exactly on the rail plane.  Axle markers sit at
+      rail level (z = 0 by default, or z from path geometry).
+
+  [3] DKP AXIS COUNTER — _DKPVisual keeps a running count of axis
+      passages and updates a Text visual above the diamond after each
+      flash.  Counter resets to 0 when the simulation is stopped.
+
+  [4] COUPLER CONNECTIONS — a single Line visual (_coupler_line) spans
+      all wagon junction points (rear of wagon i = front of wagon i+1).
+      Updated every tick along with wagon positions.
+
+Dependencies:
+  pip install vispy pyopengl
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Dict, List, Optional
+
+import numpy as np
+
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout,
+    QLabel, QPushButton, QToolBar, QMessageBox, QSizePolicy,
+)
+
+try:
+    import vispy
+    import vispy.scene
+    import vispy.scene.visuals as visuals
+    from vispy.scene import SceneCanvas
+    from vispy.app import use_app
+    use_app("pyqt6")
+except ImportError as _err:
+    raise ImportError(
+        "VisPy is required for the 3D scene window.\n"
+        "Install it with:  pip install vispy pyopengl\n"
+        f"Original error: {_err}"
+    ) from _err
+
+from physics.models import SimConfig, SimState, DKPEvent, WagonDef, DKPConfig
+from physics.simulation_engine import SimulationEngine
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Track geometry constants  (mm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+GAUGE_MM         = 1520.0
+RAIL_OFFSET      = GAUGE_MM / 2.0
+SLEEPER_STEP_MM  = 600.0
+SLEEPER_OVERHANG = GAUGE_MM * 0.40
+DKP_POLE_HEIGHT  = GAUGE_MM * 0.60
+DKP_HEAD_HALF    = GAUGE_MM * 0.18
+
+# Coupler geometry
+COUPLER_DIAMETER = GAUGE_MM * 0.08   # visual thickness represented as marker size
+_COUPLER_COLOR   = (0.70, 0.72, 0.76, 1.0)   # light steel coupler bar
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Colour palette
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BG             = (0.07, 0.07, 0.09, 1.0)
+_GRID           = (0.16, 0.17, 0.20, 1.0)
+
+_RAIL           = (0.72, 0.74, 0.78, 1.0)
+_SLEEPER        = (0.30, 0.26, 0.22, 1.0)
+
+_DKP_POLE       = (0.50, 0.54, 0.60, 1.0)
+_DKP_FOX_IDLE   = (0.12, 0.88, 0.92, 1.0)
+_DKP_MON_IDLE   = (0.96, 0.54, 0.08, 1.0)
+_DKP_FLASH      = (1.00, 1.00, 1.00, 1.0)
+_DKP_LABEL      = (0.76, 0.88, 1.00, 1.0)
+_DKP_COUNT      = (0.95, 0.95, 0.60, 1.0)   # warm yellow — axis count readout
+
+_WAGON_BODY     = (0.20, 0.33, 0.52, 1.0)
+_WAGON_EDGE     = (0.50, 0.68, 0.90, 0.50)
+_AXLE_FACE      = (0.95, 0.84, 0.18, 1.0)
+_AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
+
+_TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
+
+_DKP_FLASH_MS   = 320
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Path geometry helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _PathGeom:
+    """Cached geometry for one straight track segment."""
+
+    def __init__(self, d: dict) -> None:
+        self.track_id: str = str(d.get("track_id", ""))
+        self.name:     str = str(d.get("name", ""))
+        self.p1 = np.array(
+            [float(d.get("x1", 0.0)), float(d.get("y1", 0.0)), float(d.get("z1", 0.0))],
+            dtype=np.float64,
+        )
+        self.p2 = np.array(
+            [float(d.get("x2", 0.0)), float(d.get("y2", 0.0)), float(d.get("z2", 0.0))],
+            dtype=np.float64,
+        )
+        delta          = self.p2 - self.p1
+        self.length    = float(np.linalg.norm(delta))
+        self.unit_vec  = (delta / self.length) if self.length > 0.0 else np.array([1., 0., 0.])
+        self.perp_vec  = np.array([-self.unit_vec[1], self.unit_vec[0], 0.0])
+        self.up_vec    = np.array([0.0, 0.0, 1.0])
+
+    def s_to_xyz(self, s_mm: float) -> np.ndarray:
+        return self.p1 + self.unit_vec * s_mm
+
+    def s_to_xyz_off(self, s_mm: float, lateral: float, vertical: float = 0.0) -> np.ndarray:
+        return (
+            self.p1
+            + self.unit_vec * s_mm
+            + self.perp_vec * lateral
+            + self.up_vec   * vertical
+        )
+
+    @property
+    def midpoint(self) -> np.ndarray:
+        return (self.p1 + self.p2) * 0.5
+
+    # [2] helper: Z coordinate of the rail surface at position s_mm
+    def rail_z(self, s_mm: float) -> float:
+        """Z-height of the rail plane at s_mm (interpolated along segment)."""
+        t = s_mm / self.length if self.length > 0 else 0.0
+        return float(self.p1[2] + t * (self.p2[2] - self.p1[2]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DKP visual bundle  (pole + diamond head + halo + counter)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _DKPVisual:
+    """Visual bundle for one DKP sensor.
+
+    Parts:
+      shaft  — vertical Line from ground to pole top
+      head   — diamond (closed Line strip); Fox=cyan, Mongoose=orange
+      halo   — Markers disc; grows white on flash
+      count  — Text visual showing cumulative axis count  [NEW]
+    """
+
+    def __init__(self, geom: _PathGeom, dkp: DKPConfig, scene: object) -> None:
+        self._idle_color: tuple = (
+            _DKP_FOX_IDLE if dkp.sensor_type == "Fox" else _DKP_MON_IDLE
+        )
+        self._count: int = 0   # [3] cumulative axis passages
+
+        lateral = -(RAIL_OFFSET + GAUGE_MM * 0.28)
+        base    = geom.s_to_xyz_off(dkp.s_mm, lateral, 0.0).astype(np.float32)
+        top     = geom.s_to_xyz_off(dkp.s_mm, lateral, DKP_POLE_HEIGHT).astype(np.float32)
+        head_c  = top.copy()
+
+        # Shaft
+        self._shaft = visuals.Line(
+            pos=np.array([base, top], dtype=np.float32),
+            color=_DKP_POLE, width=2, method="gl", parent=scene,
+        )
+
+        # Diamond head
+        hs = DKP_HEAD_HALF
+        u  = geom.unit_vec.astype(np.float32)
+        pts_diamond = np.array([
+            head_c + u * hs,
+            head_c + np.array([0., 0.,  hs], np.float32),
+            head_c - u * hs,
+            head_c + np.array([0., 0., -hs], np.float32),
+            head_c + u * hs,
+        ], dtype=np.float32)
+        self._head = visuals.Line(
+            pos=pts_diamond, color=self._idle_color,
+            width=3, method="gl", connect="strip", parent=scene,
+        )
+
+        # Halo
+        self._halo = visuals.Markers(parent=scene)
+        self._halo_pos = head_c.reshape(1, 3)
+        self._set_halo_idle()
+
+        # ID + type label (static)
+        lbl = dkp.sensor_id
+        if dkp.sensor_type:
+            lbl += f" [{dkp.sensor_type}]"
+        if not dkp.enabled:
+            lbl += "  ○"
+        id_label_pos = head_c + np.array([0., 0., hs * 1.5], np.float32)
+        visuals.Text(
+            text=lbl, pos=id_label_pos,
+            color=_DKP_LABEL, font_size=7,
+            anchor_x="left", anchor_y="bottom", parent=scene,
+        )
+
+        # [3] Axis counter — dynamic Text, stored for update
+        self._count_pos = (head_c + np.array([0., 0., hs * 3.0], np.float32))
+        self._count_text = visuals.Text(
+            text="0 осей",
+            pos=self._count_pos,
+            color=_DKP_COUNT,
+            font_size=8,
+            bold=True,
+            anchor_x="left",
+            anchor_y="bottom",
+            parent=scene,
+        )
+
+    # ── internal helpers ───────────────────────────────────────────────
+
+    def _set_halo_idle(self) -> None:
+        c = self._idle_color
+        self._halo.set_data(
+            pos=self._halo_pos, size=20,
+            face_color=(*c[:3], 0.20),
+            edge_color=c, edge_width=1.8,
+        )
+
+    def _set_halo_flash(self) -> None:
+        self._halo.set_data(
+            pos=self._halo_pos, size=32,
+            face_color=(1., 1., 1., 0.40),
+            edge_color=_DKP_FLASH, edge_width=2.5,
+        )
+
+    # ── public API ─────────────────────────────────────────────────────
+
+    def flash(self) -> None:
+        """Trigger: flash white and increment axis counter."""
+        self._head.set_data(color=_DKP_FLASH)
+        self._set_halo_flash()
+        # [3] increment and refresh counter text
+        self._count += 1
+        self._count_text.text = f"{self._count} {'ось' if self._count == 1 else 'осей'}"
+
+    def reset_flash(self) -> None:
+        """Restore idle colours (counter is NOT reset here)."""
+        self._head.set_data(color=self._idle_color)
+        self._set_halo_idle()
+
+    def reset_counter(self) -> None:
+        """[3] Reset axis count to zero — called on engine stop."""
+        self._count = 0
+        self._count_text.text = "0 осей"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main window
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SceneWindow(QMainWindow):
+    """Standalone 3D visualisation window for one simulation run."""
+
+    def __init__(
+        self,
+        engine:     SimulationEngine,
+        sim_config: SimConfig,
+        path_data:  List[dict],
+        parent:     Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._engine = engine
+        self._config = sim_config
+        self._steps  = sim_config.steps
+        self._paused = False
+
+        self._paths: Dict[str, _PathGeom] = {}
+        for d in path_data:
+            g = _PathGeom(d)
+            self._paths[g.track_id] = g
+
+        self._wagons: List[WagonDef]           = engine._wagons
+        self._wagon_front_offsets: List[float] = engine._wagon_front_offsets
+
+        self.setWindowTitle("Хамелеон — 3D-сцена")
+        self.resize(1280, 720)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._build_toolbar()
+
+        self._canvas = SceneCanvas(keys="interactive", bgcolor=_BG, show=False)
+        cw = self._canvas.native
+        cw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(cw)
+
+        self._view = self._canvas.central_widget.add_view()
+        self._view.camera = "turntable"
+        self._view.camera.fov       = 40
+        self._view.camera.elevation = 28
+        self._view.camera.azimuth   = -60
+
+        # Runtime-updated scene objects
+        self._dkp_visuals:   Dict[str, _DKPVisual] = {}
+        self._wagon_visuals: List[visuals.Box]       = []
+        self._axle_visuals:  List[visuals.Markers]   = []
+        self._coupler_line:  Optional[visuals.Line]  = None   # [4]
+
+        # Build static scene
+        self._init_ground_grid()
+        self._init_tracks()
+        self._init_dkp_markers()
+        self._init_wagon_visuals()
+
+        self._view.camera.set_range()
+
+        engine.tick_updated.connect(self._on_tick)
+        engine.dkp_triggered.connect(self._on_dkp_triggered)
+        engine.step_changed.connect(self._on_step_changed)
+        engine.sim_finished.connect(self._on_sim_finished)
+
+        self._set_state_idle()
+
+    # ================================================================== #
+    #  Toolbar                                                            #
+    # ================================================================== #
+
+    def _build_toolbar(self) -> None:
+        tb: QToolBar = self.addToolBar("Управление")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setStyleSheet(
+            "QToolBar { background:#101318; border-bottom:1px solid #252930; spacing:4px; }"
+            "QPushButton { background:#1a1f28; color:#c8d4e8;"
+            "  border:1px solid #353d4d; border-radius:4px;"
+            "  padding:3px 14px; font-size:12px; }"
+            "QPushButton:hover { background:#242d3e; border-color:#5070a0; }"
+            "QPushButton:disabled { color:#3a3f4a; border-color:#1e2228; }"
+            "QLabel { color:#6878a0; font-family:'Courier New',monospace;"
+            "  font-size:12px; padding:0 8px; }"
+        )
+
+        self._btn_start = QPushButton("▶  Пуск")
+        self._btn_pause = QPushButton("⏸  Пауза")
+        self._btn_stop  = QPushButton("⏹  Стоп")
+        for btn in (self._btn_start, self._btn_pause, self._btn_stop):
+            btn.setFixedHeight(28)
+            btn.setMinimumWidth(100)
+            tb.addWidget(btn)
+
+        tb.addSeparator()
+
+        self._step_label  = QLabel("Шаг: —")
+        self._speed_label = QLabel("0 мм/с  ·  0.00 км/ч")
+        self._clock_label = QLabel("00:00.000")
+        for lbl in (self._step_label, self._speed_label, self._clock_label):
+            tb.addWidget(lbl)
+
+        self._btn_start.clicked.connect(self._cmd_start)
+        self._btn_pause.clicked.connect(self._cmd_pause)
+        self._btn_stop.clicked.connect(self._cmd_stop)
+
+    # ================================================================== #
+    #  Scene initialisation                                               #
+    # ================================================================== #
+
+    def _init_ground_grid(self) -> None:
+        all_pts = [p for g in self._paths.values() for p in (g.p1, g.p2)]
+        if not all_pts:
+            return
+
+        pts  = np.array(all_pts)
+        span = max(
+            pts[:, 0].max() - pts[:, 0].min(),
+            pts[:, 1].max() - pts[:, 1].min(),
+            1.0,
+        )
+        pad   = span * 0.30
+        min_x, max_x = pts[:, 0].min() - pad, pts[:, 0].max() + pad
+        min_y, max_y = pts[:, 1].min() - pad, pts[:, 1].max() + pad
+        step = max(span / 8.0, 1.0)
+
+        lines, conn = [], []
+        for coord, lo, hi, ax in (
+            (np.arange(min_x, max_x + step * .01, step), min_y, max_y, "x"),
+            (np.arange(min_y, max_y + step * .01, step), min_x, max_x, "y"),
+        ):
+            for v in coord:
+                idx = len(lines)
+                if ax == "x":
+                    lines += [[v, lo, 0.], [v, hi, 0.]]
+                else:
+                    lines += [[lo, v, 0.], [hi, v, 0.]]
+                conn.append([idx, idx + 1])
+
+        if lines:
+            visuals.Line(
+                pos=np.array(lines, dtype=np.float32),
+                color=(*_GRID[:3], 0.45), width=1, method="gl",
+                connect=np.array(conn, dtype=np.uint32),
+                parent=self._view.scene,
+            )
+
+    def _init_tracks(self) -> None:
+        for geom in self._paths.values():
+            if geom.length < 1.0:
+                continue
+            self._draw_rails(geom)
+            self._draw_sleepers(geom)
+            self._draw_track_label(geom)
+
+    def _draw_rails(self, geom: _PathGeom) -> None:
+        for side in (+1.0, -1.0):
+            r1 = geom.s_to_xyz_off(0.0,         side * RAIL_OFFSET).astype(np.float32)
+            r2 = geom.s_to_xyz_off(geom.length, side * RAIL_OFFSET).astype(np.float32)
+            visuals.Line(
+                pos=np.array([r1, r2], dtype=np.float32),
+                color=_RAIL, width=3, method="gl", parent=self._view.scene,
+            )
+
+    def _draw_sleepers(self, geom: _PathGeom) -> None:
+        n = max(2, int(geom.length / SLEEPER_STEP_MM))
+        pts, conn = [], []
+        for i in range(n + 1):
+            s   = min(i * SLEEPER_STEP_MM, geom.length)
+            lft = geom.s_to_xyz_off(s, -(RAIL_OFFSET + SLEEPER_OVERHANG)).astype(np.float32)
+            rgt = geom.s_to_xyz_off(s,  (RAIL_OFFSET + SLEEPER_OVERHANG)).astype(np.float32)
+            idx = len(pts)
+            pts += [lft, rgt]
+            conn.append([idx, idx + 1])
+        visuals.Line(
+            pos=np.array(pts, dtype=np.float32),
+            color=(*_SLEEPER[:3], 0.70), width=2, method="gl",
+            connect=np.array(conn, dtype=np.uint32),
+            parent=self._view.scene,
+        )
+
+    def _draw_track_label(self, geom: _PathGeom) -> None:
+        lbl = geom.track_id + (f"  {geom.name}" if geom.name else "")
+        pos = geom.s_to_xyz_off(geom.length * 0.5, 0.0, DKP_POLE_HEIGHT * 0.55)
+        visuals.Text(
+            text=lbl, pos=pos.astype(np.float32),
+            color=_TRACK_LABEL, font_size=9,
+            anchor_x="center", anchor_y="bottom", parent=self._view.scene,
+        )
+
+    def _init_dkp_markers(self) -> None:
+        for dkp in self._config.dkps:
+            geom = self._paths.get(dkp.track_id)
+            if geom is None:
+                continue
+            self._dkp_visuals[dkp.sensor_id] = _DKPVisual(geom, dkp, self._view.scene)
+
+    def _init_wagon_visuals(self) -> None:
+        geom = self._paths.get(self._config.train.track_id)
+        if geom is None:
+            return
+
+        for wi, wagon in enumerate(self._wagons):
+            s_front = self._config.train.s0_mm - self._wagon_front_offsets[wi]
+            s_rear  = s_front - wagon.length_mm
+
+            # [2] vertical offset: place box bottom on the rail surface
+            wagon_h = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
+            z_rail  = geom.rail_z((s_front + s_rear) / 2.0)
+            z_center = z_rail + wagon_h / 2.0   # box centre above rail plane
+
+            pf = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
+            pr = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
+            center = (pf + pr) * 0.5
+
+            wagon_len = float(np.linalg.norm(
+                geom.s_to_xyz(s_front) - geom.s_to_xyz(s_rear)
+            ))
+            wagon_w = GAUGE_MM * 0.88
+
+            box = visuals.Box(
+                width=wagon_len, height=wagon_h, depth=wagon_w,
+                color=(*_WAGON_BODY[:3], 0.85), edge_color=_WAGON_EDGE,
+                parent=self._view.scene,
+            )
+            t = vispy.scene.transforms.MatrixTransform()
+            t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
+            t.translate(center.astype(np.float64))
+            box.transform = t
+            self._wagon_visuals.append(box)
+
+            # Axle wheel markers — sit at rail level (z_rail)
+            axle_pts = [
+                geom.s_to_xyz_off(s_front - ax.offset_mm, 0.0, z_rail).astype(np.float32)
+                for ax in wagon.axles
+            ]
+            if axle_pts:
+                m = visuals.Markers(parent=self._view.scene)
+                m.set_data(
+                    pos=np.array(axle_pts, dtype=np.float32),
+                    size=10, face_color=_AXLE_FACE,
+                    edge_color=_AXLE_EDGE, edge_width=1.5,
+                )
+                self._axle_visuals.append(m)
+
+        # [4] Coupler line — one polyline through all junction points
+        self._coupler_line = visuals.Line(
+            pos=self._coupler_points(self._config.train.s0_mm, geom),
+            color=_COUPLER_COLOR, width=4, method="gl",
+            connect="strip", parent=self._view.scene,
+        )
+
+    # ================================================================== #
+    #  Engine signal handlers                                             #
+    # ================================================================== #
+
+    def _on_tick(self, state: SimState) -> None:
+        geom = self._paths.get(self._config.train.track_id)
+        if geom is None:
+            return
+
+        # [1] Boundary check — stop if train exits the track
+        if self._check_boundary(state, geom):
+            return   # engine already paused; skip position update
+
+        for wi, wagon in enumerate(self._wagons):
+            s_front = state.s_head_mm - self._wagon_front_offsets[wi]
+            s_rear  = s_front - wagon.length_mm
+
+            # [2] Correct vertical placement
+            wagon_h  = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
+            z_rail   = geom.rail_z((s_front + s_rear) / 2.0)
+            z_center = z_rail + wagon_h / 2.0
+
+            pf     = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
+            pr     = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
+            center = (pf + pr) * 0.5
+
+            t = vispy.scene.transforms.MatrixTransform()
+            t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
+            t.translate(center.astype(np.float64))
+            self._wagon_visuals[wi].transform = t
+
+            if wi < len(self._axle_visuals):
+                axle_pts = [
+                    geom.s_to_xyz_off(a.s_mm, 0.0, z_rail).astype(np.float32)
+                    for a in state.axes if a.wagon_index == wi
+                ]
+                if axle_pts:
+                    self._axle_visuals[wi].set_data(
+                        pos=np.array(axle_pts, dtype=np.float32),
+                        size=10, face_color=_AXLE_FACE,
+                        edge_color=_AXLE_EDGE, edge_width=1.5,
+                    )
+
+        # [4] Update coupler line
+        if self._coupler_line is not None:
+            self._coupler_line.set_data(
+                pos=self._coupler_points(state.s_head_mm, geom),
+            )
+
+        v_mms = abs(state.v_mms)
+        self._speed_label.setText(f"{v_mms:.0f} мм/с  ·  {state.speed_kmh:.2f} км/ч")
+        self._clock_label.setText(_fmt_time(state.t_ms))
+        self._step_label.setText(f"Шаг: {state.step_index + 1}/{len(self._steps)}")
+        self._canvas.update()
+
+    def _on_dkp_triggered(self, event: DKPEvent) -> None:
+        bundle = self._dkp_visuals.get(event.sensor_id)
+        if bundle:
+            bundle.flash()
+            self._canvas.update()
+            QTimer.singleShot(_DKP_FLASH_MS, lambda: self._reset_dkp(event.sensor_id))
+
+    def _reset_dkp(self, sensor_id: str) -> None:
+        bundle = self._dkp_visuals.get(sensor_id)
+        if bundle:
+            bundle.reset_flash()
+            self._canvas.update()
+
+    def _on_step_changed(self, idx: int) -> None:
+        self._step_label.setText(f"Шаг: {idx + 1}/{len(self._steps)}")
+
+    def _on_sim_finished(self) -> None:
+        self._set_state_idle()
+        self._clock_label.setText(_fmt_time(self._engine._t_ms))
+
+    # ================================================================== #
+    #  [1] Boundary enforcement                                           #
+    # ================================================================== #
+
+    def _check_boundary(self, state: SimState, geom: _PathGeom) -> bool:
+        """Pause the engine and warn if the train has left the track.
+
+        Returns True if a boundary violation was detected (caller skips
+        the rest of the tick's visual update in that case).
+        """
+        if not self._wagons:
+            return False
+
+        # Head of the train
+        s_head = state.s_head_mm
+        # Tail: front of the last wagon minus its length
+        last_wagon   = self._wagons[-1]
+        last_offset  = self._wagon_front_offsets[-1]
+        s_tail = s_head - last_offset - last_wagon.length_mm
+
+        violated = False
+        if s_head > geom.length + 1.0:
+            violated = True
+            msg = (f"Состав вышел за конец пути «{geom.track_id}».\n"
+                   f"Голова: {s_head/1000:.2f} м  /  Длина пути: {geom.length/1000:.2f} м")
+        elif s_tail < -1.0:
+            violated = True
+            msg = (f"Состав вышел за начало пути «{geom.track_id}».\n"
+                   f"Хвост: {s_tail/1000:.2f} м")
+
+        if violated:
+            self._engine.pause()
+            self._paused = True
+            self._set_state_paused()
+            QMessageBox.warning(self, "Граница пути", msg)
+
+        return violated
+
+    # ================================================================== #
+    #  [4] Coupler geometry                                               #
+    # ================================================================== #
+
+    def _coupler_points(self, s_head_mm: float, geom: _PathGeom) -> np.ndarray:
+        """Build the polyline of coupler junction points.
+
+        The polyline visits:
+          front of wagon 0, rear of wagon 0 / front of wagon 1,
+          rear of wagon 1 / front of wagon 2, … rear of last wagon.
+
+        We use wagon centres at the midpoint Z so the bar stays at roof
+        height — actually we use a coupler_z slightly above rail level.
+        """
+        pts = []
+        for wi, wagon in enumerate(self._wagons):
+            s_front = s_head_mm - self._wagon_front_offsets[wi]
+            s_rear  = s_front - wagon.length_mm
+            wagon_h = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
+            # Place couplers at 30% wagon height above rail (below wagon mid)
+            z_coupler = geom.rail_z(s_front) + wagon_h * 0.30
+
+            front_pt = geom.s_to_xyz_off(s_front, 0.0, z_coupler).astype(np.float32)
+            rear_pt  = geom.s_to_xyz_off(s_rear,  0.0, z_coupler).astype(np.float32)
+
+            if wi == 0:
+                pts.append(front_pt)
+            pts.append(rear_pt)
+
+        if len(pts) < 2:
+            # Fallback: at least two identical points so Line doesn't error
+            p = geom.s_to_xyz(s_head_mm).astype(np.float32)
+            pts = [p, p]
+
+        return np.array(pts, dtype=np.float32)
+
+    # ================================================================== #
+    #  Control button handlers                                            #
+    # ================================================================== #
+
+    def _cmd_start(self) -> None:
+        errors = self._engine.validate()
+        if errors:
+            QMessageBox.critical(
+                self, "Ошибка конфигурации",
+                "Симуляция не может быть запущена:\n\n" +
+                "\n".join(f"• {e}" for e in errors),
+            )
+            return
+        try:
+            self._engine.start()
+        except ValueError as exc:
+            QMessageBox.critical(self, "Ошибка запуска", str(exc))
+            return
+        self._paused = False
+        self._set_state_running()
+
+    def _cmd_pause(self) -> None:
+        if not self._paused:
+            self._engine.pause()
+            self._paused = True
+            self._set_state_paused()
+        else:
+            self._engine.resume()
+            self._paused = False
+            self._set_state_running()
+
+    def _cmd_stop(self) -> None:
+        self._engine.stop()
+        self._paused = False
+        self._speed_label.setText("0 мм/с  ·  0.00 км/ч")
+        self._clock_label.setText("00:00.000")
+        self._step_label.setText("Шаг: —")
+        # [3] Reset all DKP counters on stop
+        for bundle in self._dkp_visuals.values():
+            bundle.reset_counter()
+        self._canvas.update()
+        self._set_state_idle()
+
+    # ================================================================== #
+    #  Button state machine                                               #
+    # ================================================================== #
+
+    def _set_state_idle(self) -> None:
+        self._btn_start.setEnabled(True)
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.setText("⏸  Пауза")
+        self._btn_stop.setEnabled(False)
+
+    def _set_state_running(self) -> None:
+        self._btn_start.setEnabled(False)
+        self._btn_pause.setEnabled(True)
+        self._btn_pause.setText("⏸  Пауза")
+        self._btn_stop.setEnabled(True)
+
+    def _set_state_paused(self) -> None:
+        self._btn_start.setEnabled(False)
+        self._btn_pause.setEnabled(True)
+        self._btn_pause.setText("▶  Продолжить")
+        self._btn_stop.setEnabled(True)
+
+    # ================================================================== #
+    #  Canvas access  (for output_writer.py §5.3)                        #
+    # ================================================================== #
+
+    @property
+    def canvas(self) -> SceneCanvas:
+        return self._canvas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_time(t_ms: int) -> str:
+    total_s = t_ms // 1000
+    ms_part = t_ms % 1000
+    return f"{total_s // 60:02d}:{total_s % 60:02d}.{ms_part:03d}"
