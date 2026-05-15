@@ -1,247 +1,46 @@
-# Хамелеон — Полная файловая структура проекта
-
-> **Стек:** PyQt6 · PyVista/VTK · NumPy · NetworkX · Pydantic v2 · JSON stdlib · PyInstaller · Python 3.11+ / Windows 10/11 x64
-
----
-
-```
-project/
-│
-├── main.py
-│   └── <entry point>
-│       └── creates QApplication → MainWindow → window.show()
-│
-├── physics/
-│   └── models.py                          ← (simulation dataclasses — file not provided)
-│       └── NOTE: WagonDef / DKPConfig / ScenarioStep previously presumed here;
-│               storage-layer equivalents are now defined in storage/models.py (v0.2)
+chameleon/
+├── main.py                              # Точка входа: запускает QApplication + MainWindow
 │
 ├── storage/
-│   ├── models.py                          ← project-level data containers  [UPDATED v0.2]
-│   │   │
-│   │   ├── class AxleDef                  (dataclass)          ← NEW
-│   │   │   ├── fields: offset_mm: float
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → AxleDef
-│   │   │
-│   │   ├── class WagonSequenceEntry       (dataclass)          ← NEW
-│   │   │   ├── fields: wagon_id, count, reversed
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → WagonSequenceEntry
-│   │   │
-│   │   ├── class ScenarioStep             (dataclass)          ← NEW
-│   │   │   ├── fields: duration_ms, v0_mms, accel_mms2,
-│   │   │   │           v_threshold_mms, behavior
-│   │   │   ├── ALLOWED_BEHAVIORS = {'LeftToRight','RightToLeft','Stop'}
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → ScenarioStep
-│   │   │
-│   │   ├── class PathRecord               (dataclass)          ← UPDATED
-│   │   │   ├── fields: track_id, name,
-│   │   │   │           x1, y1, z1, x2, y2, z2                 (was: x, z, length_mm)
-│   │   │   ├── @property length_mm → float                    (computed; not stored)
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → PathRecord
-│   │   │
-│   │   ├── class DKPRecord                (dataclass)          ← NEW
-│   │   │   ├── fields: sensor_id, track_id, s_mm, sensor_type,
-│   │   │   │           enabled, direction_filter, zone_mm
-│   │   │   ├── SENSOR_TYPES      = {'Fox', 'Mongoose'}
-│   │   │   ├── DIRECTION_FILTERS = {'Any','LeftToRight','RightToLeft'}
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → DKPRecord
-│   │   │
-│   │   ├── class WagonRecord              (dataclass)          ← NEW
-│   │   │   ├── fields: wagon_id, name, wagon_type, length_mm, height_mm,
-│   │   │   │           bogie_base_mm, axles: List[AxleDef], model_path
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → WagonRecord
-│   │   │
-│   │   ├── class TrainRecord              (dataclass)          ← NEW
-│   │   │   ├── fields: train_id, track_id, s0_mm, direction,
-│   │   │   │           wagon_sequence: List[WagonSequenceEntry]
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → TrainRecord
-│   │   │
-│   │   ├── class ScenarioRecord           (dataclass)          ← UPDATED
-│   │   │   ├── fields: scenario_id, name, steps: List[ScenarioStep]
-│   │   │   │           (was: name, active, steps: List[dict])
-│   │   │   ├── def to_dict() → dict
-│   │   │   └── @classmethod from_dict(d) → ScenarioRecord
-│   │   │
-│   │   └── class ProjectData              (dataclass)          ← UPDATED
-│   │       ├── fields: version, paths, dkps, wagons, train, scenario
-│   │       │           (was: paths, sensors, wagons, scenarios, train)
-│   │       ├── def to_dict() → dict
-│   │       ├── @classmethod from_dict(d) → ProjectData
-│   │       └── def path_lengths() → dict[str, float]
-│   │
-│   └── project_store.py                   ← JSON save / load  [UPDATED v0.2]
-│       └── class ProjectStore
-│           ├── ENCODING           = "utf-8"
-│           ├── INDENT             = 2
-│           ├── EXTENSION          = ".chameleon.json"          ← NEW
-│           ├── SUPPORTED_VERSIONS = frozenset({"0.2"})         ← NEW
-│           ├── @staticmethod save(data: ProjectData, path) → None
-│           ├── @staticmethod load(path) → ProjectData
-│           └── @staticmethod _migrate(data, from_version) → dict  ← NEW
+│   ├── __init__.py
+│   ├── models.py                        # ProjectData, PathRecord, DKPRecord, WagonRecord,
+│   │                                    # TrainRecord, ScenarioRecord, ScenarioStep, AxleDef,
+│   │                                    # WagonSequenceEntry — хранение и сериализация
+│   ├── project_store.py                 # ProjectStore.save() / .load() — низкоуровневый I/O
+│   └── project_io.py                    # [NEW 4.3] ProjectIO.save() / .load() /
+│                                        #   .validate_structure() — высокоуровневый фасад
+│
+├── physics/
+│   ├── __init__.py
+│   └── models.py                        # AxleDef, WagonDef, TrainConfig, DKPConfig,
+│                                        # ScenarioStep, SimConfig — конфиги движка;
+│                                        # AxisState, DKPEvent, SimState — состояние
 │
 ├── validation/
-│   └── validators.py                      ← pure validation, zero Qt dependency
-│       ├── @dataclass(frozen=True) ValidationError
-│       │   └── fields: row, field, message
-│       │
-│       ├── def validate_dkp_sensors(sensors, path_lengths) → List[ValidationError]
-│       │   └── rules: s_mm parseable & ≥ 0 & ≤ path length; zone_mm > 0
-│       │
-│       ├── def validate_paths(paths) → List[ValidationError]
-│       │   └── rules: track_id non-empty & unique; length_mm > 0
-│       │
-│       └── def validate_scenario_steps(steps) → List[ValidationError]
-│           └── rules: duration_ms ≥ 0; v_threshold_mms ≥ 0; behavior in allowed set
+│   ├── __init__.py
+│   └── validators.py                    # validate_dkp_sensors(), validate_paths(),
+│                                        # validate_scenario_steps() — чистые функции без Qt
 │
 └── ui/
-    ├── main_window.py                     ← top-level window; owns ProjectData I/O
-    │   └── class MainWindow               (QMainWindow)
-    │       ├── __init__()                 builds nav buttons + QStackedWidget
-    │       ├── def _reset_nav_labels()
-    │       ├── def _on_dkp_clicked()      toggles DkpPage ↔ PathsPage
-    │       ├── def _on_sostav_clicked()   toggles SostavPage ↔ PathsPage
-    │       ├── def _on_scenario_clicked() toggles ScenarioPage ↔ PathsPage
-    │       ├── def _collect_project() → ProjectData
-    │       ├── def _apply_project(data: ProjectData)
-    │       ├── def _save_project()        QFileDialog → ProjectStore.save()
-    │       └── def _load_project()        QFileDialog → ProjectStore.load()
-    │
+    ├── __init__.py
+    ├── main_window.py                   # [UPDATED 4.4] MainWindow: QMenuBar «Файл»
+    │                                    #   (Новый/Открыть/Сохранить/Сохранить как),
+    │                                    #   self._current_file, заголовок окна,
+    │                                    #   делегирование в ProjectIO
     ├── pages/
-    │   ├── base_page.py                   ← abstract base for all editor pages
-    │   │   └── class BasePage             (QWidget, ABC)
-    │   │       ├── @abstractmethod to_dict() → list | dict
-    │   │       └── @abstractmethod from_dict(data)
-    │   │
-    │   ├── paths_page.py                  ← track / path definitions editor
-    │   │   └── class PathsPage            (BasePage)
-    │   │       ├── __init__()             QTableWidget (6 cols) + "Добавить путь"
-    │   │       ├── def add_row(record?)   insert row from PathRecord or blank
-    │   │       ├── def get_selected_path_length() → float
-    │   │       ├── def to_records() → list[PathRecord]
-    │   │       ├── def validate() → list[str]   (calls validate_paths + highlights)
-    │   │       ├── def to_dict() → list[dict]
-    │   │       ├── def from_dict(data)
-    │   │       ├── def _text(row, col) → str
-    │   │       ├── def _float(row, col) → float
-    │   │       └── def _apply_highlights(errors)
-    │   │
-    │   ├── dkp_page.py                    ← trackside DKP sensor editor
-    │   │   └── class DkpPage              (BasePage)
-    │   │       ├── __init__()             QTableWidget (8 cols) + "Добавить строку ДКП"
-    │   │       ├── def add_row(record?)   insert row with QComboBox + QCheckBox
-    │   │       ├── def validate(path_lengths) → list[str]
-    │   │       ├── def to_dict() → list[dict]
-    │   │       ├── def from_dict(data)
-    │   │       ├── def _delete_row()
-    │   │       ├── def _text(row, col) → str
-    │   │       ├── def _float(row, col) → float
-    │   │       └── def _apply_highlights(errors)
-    │   │
-    │   ├── sostav_page.py                 ← (file not provided)
-    │   │   └── class SostavPage           (BasePage — inferred)
-    │   │       ├── def set_length(length)
-    │   │       ├── def to_dict() → dict   {'wagons': [...], 'train': {...}}
-    │   │       └── def from_dict(data)
-    │   │
-    │   └── scenario_page.py               ← simulation scenario manager
-    │       └── class ScenarioPage         (BasePage)
-    │           ├── __init__()             QTableWidget (5 cols) + _steps_data list
-    │           ├── def add_row(record?)   insert row + QCheckBox + open-dialog button
-    │           ├── def to_dict() → list[dict]
-    │           ├── def from_dict(data)
-    │           ├── def _to_records() → list[ScenarioRecord]
-    │           ├── def _open_steps_dialog()   opens ScenarioStepsDialog
-    │           ├── def _delete_row()
-    │           ├── def _find_row(widget, col) → int
-    │           └── def _text(row, col) → str
-    │
+    │   ├── __init__.py
+    │   ├── base_page.py                 # BasePage(QWidget) — абстрактный контракт
+    │   │                                #   to_dict() / from_dict()
+    │   ├── paths_page.py                # PathsPage — редактор путей;
+    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
+    │   ├── dkp_page.py                  # DkpPage — редактор ДКП;
+    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
+    │   ├── sostav_page.py               # SostavPage — редактор состава;
+    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
+    │   └── scenario_page.py             # ScenarioPage — список сценариев;
+    │                                    #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     └── dialogs/
-        ├── scenario_steps_dialog.py       ← modal editor for one scenario's steps
-        │   └── class ScenarioStepsDialog  (QDialog)
-        │       ├── __init__(parent, initial_steps?)
-        │       ├── def get_steps() → list[dict]
-        │       ├── def set_steps(steps)
-        │       ├── def validate() → list[str]
-        │       ├── def _add_step()
-        │       ├── def _insert_row(*, duration_ms, v0, accel, threshold, behavior)
-        │       ├── def _delete_step()
-        │       ├── def _renumber_steps()
-        │       ├── def _select_step()
-        │       └── def _float(row, col) → float
-        │
-        └── wagons_dialog.py               ← modal browser / selector for wagons
-            └── class WagonsDialog         (QDialog)
-                ├── __init__(parent?)
-                ├── def _add_wagon()
-                ├── def _delete_wagon()
-                └── def _select_wagon()    → sets selected_id, selected_name
-```
-
----
-
-## Module dependency map
-
-```
-main.py
-  └─→ ui.main_window.MainWindow
-        ├─→ storage.models           (PathRecord, DKPRecord, WagonRecord,
-        │                             TrainRecord, ScenarioRecord, ProjectData)
-        ├─→ storage.project_store    (ProjectStore)
-        ├─→ ui.pages.paths_page      (PathsPage)
-        ├─→ ui.pages.dkp_page        (DkpPage)
-        ├─→ ui.pages.sostav_page     (SostavPage)
-        └─→ ui.pages.scenario_page   (ScenarioPage)
-              └─→ ui.dialogs.scenario_steps_dialog (ScenarioStepsDialog)
-                    └─→ validation.validators
-
-ui.pages.dkp_page
-  └─→ validation.validators  (validate_dkp_sensors)
-
-ui.pages.paths_page
-  └─→ validation.validators  (validate_paths)
-
-storage.project_store
-  └─→ storage.models          (ProjectData + all sub-records)
-
-ui.dialogs.wagons_dialog      (no external project imports)
-```
-
----
-
-## *.chameleon.json — структура файла проекта (v0.2)
-
-```json
-{
-  "version": "0.2",
-  "paths":   [ <PathRecord>,     ... ],
-  "dkps":    [ <DKPRecord>,      ... ],
-  "wagons":  [ <WagonRecord>,    ... ],
-  "train":     <TrainRecord>,
-  "scenario":  <ScenarioRecord>
-}
-```
-
-| Запись | Ключевые поля |
-|---|---|
-| `PathRecord` | `track_id`, `name`, `x1/y1/z1`, `x2/y2/z2` *(length_mm вычисляется)* |
-| `DKPRecord` | `sensor_id`, `track_id`, `s_mm`, `sensor_type`, `enabled`, `direction_filter`, `zone_mm` |
-| `WagonRecord` | `wagon_id`, `name`, `wagon_type`, `length_mm`, `height_mm`, `bogie_base_mm`, `axles[]`, `model_path` |
-| `TrainRecord` | `train_id`, `track_id`, `s0_mm`, `direction`, `wagon_sequence[]` |
-| `ScenarioRecord` | `scenario_id`, `name`, `steps[]` |
-| `ScenarioStep` | `duration_ms`, `v0_mms`, `accel_mms2`, `v_threshold_mms`, `behavior` |
-
----
-
-## Notes on missing / external files
-
-| File | Status | Referenced from |
-|---|---|---|
-| `physics/models.py` | **Not provided** | Storage-level equivalents (WagonRecord, DKPRecord, ScenarioStep) now live in `storage/models.py`; physics-specific runtime classes remain TBD |
-| `ui/pages/sostav_page.py` | **Not provided** | `ui/main_window.py` imports `SostavPage`; `set_length()` and `to/from_dict()` called on it; `to_dict()` must return `{'wagons': [...], 'train': {...}}` |
+        ├── __init__.py
+        ├── scenario_steps_dialog.py     # ScenarioStepsDialog — шаги сценария;
+        │                                #   get_steps() / set_steps() [4.2 ✓ уже реализованы]
+        └── wagons_dialog.py             # WagonsDialog — браузер вагонов
