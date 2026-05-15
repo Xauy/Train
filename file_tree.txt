@@ -12,9 +12,18 @@ chameleon/
 │
 ├── physics/
 │   ├── __init__.py
-│   └── models.py                        # AxleDef, WagonDef, TrainConfig, DKPConfig,
-│                                        # ScenarioStep, SimConfig — конфиги движка;
-│                                        # AxisState, DKPEvent, SimState — состояние
+│   ├── models.py                        # [DONE 2.2–2.3] AxleDef, WagonDef, WagonSlot,
+│   │                                    # TrainConfig, DKPConfig, ScenarioStep, SimConfig,
+│   │                                    # AxisState, DKPEvent, SimState
+│   └── simulation_engine.py             # [NEW 2.4–2.6] SimulationEngine(QObject):
+│                                        #   Signals: tick_updated, dkp_triggered,
+│                                        #            step_changed, sim_finished
+│                                        #   API: start(), pause(), resume(), stop(),
+│                                        #        get_state(), get_event_log()
+│                                        #   Internal: _tick() — kinematics (Б),
+│                                        #     axis update (В–Г), DKP crossing (Д),
+│                                        #     step advance (Е), state emit (Ж)
+│                                        #   validate() — pre-start integrity checks
 │
 ├── validation/
 │   ├── __init__.py
