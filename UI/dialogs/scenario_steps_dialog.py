@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTime
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+    QDialog, QVBoxLayout, QMainWindow, QHBoxLayout, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QComboBox, QMessageBox, QTimeEdit,
 )
@@ -30,7 +30,7 @@ _COL_DELETE     = 6
 _BEHAVIORS = ["LeftToRight", "RightToLeft", "Stop"]
 
 
-class ScenarioStepsDialog(QDialog):
+class ScenarioStepsDialog(QDialog, QMainWindow):
     """Dialog for viewing and editing the list of ScenarioStep records."""
 
     def __init__(self, parent=None, initial_steps: list[dict] | None = None) -> None:
@@ -51,17 +51,14 @@ class ScenarioStepsDialog(QDialog):
 
         btn_layout = QHBoxLayout()
         self.add_btn    = QPushButton("Добавить шаг")
-        self.select_btn = QPushButton("Выбрать")
         self.cancel_btn = QPushButton("Отмена")
         btn_layout.addWidget(self.add_btn)
-        btn_layout.addWidget(self.select_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
         self.selected_step_number: str | None = None
 
         self.add_btn.clicked.connect(self._add_step)
-        self.select_btn.clicked.connect(self._select_step)
         self.cancel_btn.clicked.connect(self.reject)
 
         if initial_steps:
@@ -107,6 +104,9 @@ class ScenarioStepsDialog(QDialog):
         """Validate all steps and return error messages (empty → valid)."""
         return [e.message for e in validate_scenario_steps(self.get_steps())]
 
+    def closeEvent(self, event):
+        """Сохранение значений при закрытии окна"""
+        self._select_step()
     # ------------------------------------------------------------------ #
     #  Private — row management                                            #
     # ------------------------------------------------------------------ #
@@ -162,12 +162,10 @@ class ScenarioStepsDialog(QDialog):
 
     def _select_step(self) -> None:
         current_row = self.table.currentRow()
-        if current_row < 0:
-            QMessageBox.warning(self, "Ошибка", "Выберите строку с шагом")
-            return
         num_item = self.table.item(current_row, _COL_NUM)
         self.selected_step_number = num_item.text() if num_item else ""
         self.accept()
+        return True
 
     # ------------------------------------------------------------------ #
     #  Private — helpers                                                   #
