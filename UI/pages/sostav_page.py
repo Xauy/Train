@@ -10,7 +10,7 @@ Bug fixed vs. original:
 """
 
 from __future__ import annotations
-
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView,
@@ -27,8 +27,7 @@ _COL_COUNT  = 2
 _COL_BASE   = 3
 _COL_LENGTH = 4
 _COL_HEIGHT = 5
-_COL_EDIT   = 6
-_COL_DELETE = 7
+_COL_DELETE = 6
 
 
 class SostavPage(BasePage):
@@ -40,10 +39,10 @@ class SostavPage(BasePage):
 
         # ── Composition table ──────────────────────────────────────────
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
             "Номер в составе", "Название", "Кол-во",
-            "База", "Длина", "Высота", "Изменить", "Удалить",
+            "База", "Длина", "Высота", "Удалить",
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
@@ -93,17 +92,12 @@ class SostavPage(BasePage):
         btn_num.clicked.connect(self._open_wagon_browser)
         self.table.setCellWidget(row, _COL_NUM, btn_num)
 
-        self.table.setItem(row, _COL_NAME,   QTableWidgetItem(str(r.get("name",   ""))))
-        self.table.setItem(row, _COL_COUNT,  QTableWidgetItem(str(r.get("count",  ""))))
-        self.table.setItem(row, _COL_BASE,   QTableWidgetItem(str(r.get("base",   ""))))
-        self.table.setItem(row, _COL_LENGTH, QTableWidgetItem(str(r.get("length", ""))))
-        self.table.setItem(row, _COL_HEIGHT, QTableWidgetItem(str(r.get("height", ""))))
-
-        edit_btn = QPushButton("Изменить")
-        edit_btn.clicked.connect(
-            lambda: QMessageBox.information(self, "Заглушка", "Функция изменения")
-        )
-        self.table.setCellWidget(row, _COL_EDIT, edit_btn)
+        # Создаём нередактируемые элементы для свойств вагона
+        self._set_read_only_item(row, _COL_NAME, str(r.get("name", "")))
+        self.table.setItem(row, _COL_COUNT, QTableWidgetItem(str(r.get("count", ""))))
+        self._set_read_only_item(row, _COL_BASE, str(r.get("base", "")))
+        self._set_read_only_item(row, _COL_LENGTH, str(r.get("length", "")))
+        self._set_read_only_item(row, _COL_HEIGHT, str(r.get("height", "")))
 
         del_btn = QPushButton("Удалить")
         del_btn.clicked.connect(self._delete_row)
@@ -147,6 +141,11 @@ class SostavPage(BasePage):
         if dlg.exec() == WagonsDialog.DialogCode.Accepted:
             label = f"{dlg.selected_id} - {dlg.selected_name}"
             btn.setText(label)
+            # Заполняем readonly-ячейки данными из диалога
+            self._set_read_only_item(row, _COL_NAME,   dlg.selected_name   or "")
+            self._set_read_only_item(row, _COL_BASE,   dlg.selected_base   or "")
+            self._set_read_only_item(row, _COL_LENGTH, dlg.selected_length or "")
+            self._set_read_only_item(row, _COL_HEIGHT, dlg.selected_height or "")
 
     def _delete_row(self) -> None:
         """Find the row that owns the clicked button and remove it."""
@@ -165,3 +164,12 @@ class SostavPage(BasePage):
     def _text(self, row: int, col: int) -> str:
         item = self.table.item(row, col)
         return item.text().strip() if item else ""
+
+    def _set_read_only_item(self, row: int, col: int, text: str) -> None:
+        """Create or update a read-only QTableWidgetItem in the given cell."""
+        item = self.table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem()
+            self.table.setItem(row, col, item)
+        item.setText(text)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
