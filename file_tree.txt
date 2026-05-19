@@ -7,14 +7,20 @@ chameleon/
 │   │                                    # TrainRecord, ScenarioRecord, ScenarioStep, AxleDef,
 │   │                                    # WagonSequenceEntry — хранение и сериализация
 │   ├── project_store.py                 # ProjectStore.save() / .load() — низкоуровневый I/O
-│   └── project_io.py                    # [DONE 4.3] ProjectIO.save() / .load() /
-│                                        #   .validate_structure() — высокоуровневый фасад
+│   ├── project_io.py                    # [DONE 4.3] ProjectIO.save() / .load() /
+│   │                                    #   .validate_structure() — высокоуровневый фасад
+│   └── wagon_repository.py              # load_wagons() / save_wagons() — JSON-персистенция
+│                                        #   библиотеки вагонов (wagon_library.json);
+│                                        #   используется WagonsDialog
 │
 ├── physics/
 │   ├── __init__.py
-│   ├── models.py                        # [DONE 2.2–2.3] AxleDef, WagonDef, WagonSlot,
-│   │                                    # TrainConfig, DKPConfig, ScenarioStep, SimConfig,
-│   │                                    # AxisState, DKPEvent, SimState
+│   ├── models.py                        # [DONE 2.2–2.3, UPDATED OBJ] AxleDef, WagonDef,
+│   │                                    # WagonSlot, TrainConfig, DKPConfig, ScenarioStep,
+│   │                                    # SimConfig, AxisState, DKPEvent, SimState.
+│   │                                    # [NEW] WagonDef.model_path — путь к .obj-ассету
+│   │                                    #   (опционально); сериализуется в to_dict/from_dict;
+│   │                                    #   сохраняется при mirrored-варианте в expand()
 │   └── simulation_engine.py             # [DONE 2.4–2.6] SimulationEngine(QObject):
 │                                        #   Signals: tick_updated, dkp_triggered,
 │                                        #            step_changed, sim_finished
@@ -32,26 +38,84 @@ chameleon/
 │
 └── ui/
     ├── __init__.py
-    ├── main_window.py                   # [UPDATED 4.4 + 3.6] MainWindow: QMenuBar «Файл»
-    │                                    #   (Новый/Открыть/Сохранить/Сохранить как),
-    │                                    #   self._current_file, заголовок окна,
-    │                                    #   делегирование в ProjectIO;
-    │                                    #   [NEW 3.6] кнопка «Симуляция»,
+    ├── main_window.py                   # [UPDATED 4.4 + 3.6 + OBJ] MainWindow:
+    │                                    #   QMenuBar «Файл» (Новый/Открыть/Сохранить/
+    │                                    #   Сохранить как), self._current_file,
+    │                                    #   заголовок окна, делегирование в ProjectIO;
+    │                                    #   [3.6] кнопка «Симуляция»,
     │                                    #   _on_simulation_clicked() → SceneWindow,
     │                                    #   _build_sim_config() → SimConfig,
-    │                                    #   _collect_path_data() → List[dict]
-    ├── scene_window.py                  # [NEW 3.1–3.5] SceneWindow(QMainWindow):
-    │                                    #   VisPy SceneCanvas — orbit-камера TurntableCamera,
-    │                                    #   _PathGeom — s_to_xyz() интерполяция,
-    │                                    #   _init_paths() — Line + Text на трек,
-    │                                    #   _init_dkp_markers() — Markers per sensor,
-    │                                    #   _init_wagon_visuals() — Box + Markers (оси),
-    │                                    #   _on_tick() — обновление позиций + HUD,
-    │                                    #   _on_dkp_triggered() — amber-вспышка 250 мс,
+    │                                    #   _collect_path_data() → List[dict].
+    │                                    #   [NEW OBJ] _build_sim_config() читает
+    │                                    #   row["model_path"] из SostavPage и передаёт
+    │                                    #   его в конструктор WagonDef
+    ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ]
+    │                                    #   SceneWindow(QMainWindow):
+    │                                    #
+    │                                    #   ── Module-level helpers ─────────────────
+    │                                    #   _PathGeom — кэш геометрии одного прямого
+    │                                    #     отрезка; s_to_xyz(), s_to_xyz_off(),
+    │                                    #     rail_z() — интерполяция вдоль сегмента
+    │                                    #
+    │                                    #   [NEW OBJ] _load_obj_mesh(path) →
+    │                                    #     (vertices, faces) | None.
+    │                                    #     • Кэш _OBJ_CACHE (по абсолютному пути)
+    │                                    #       — каждый файл парсится один раз.
+    │                                    #     • Если установлен trimesh → используется
+    │                                    #       он (force='mesh', process=False) —
+    │                                    #       поддержка quads, отрицательных индексов,
+    │                                    #       групп, материалов.
+    │                                    #     • Иначе → встроенный _parse_obj_simple():
+    │                                    #       минимальный pure-Python парсер v/f-строк
+    │                                    #       с триангуляцией веером.
+    │                                    #     • Тихий fallback к Box, если файл
+    │                                    #       отсутствует / нечитаем / некорректен.
+    │                                    #
+    │                                    #   [NEW OBJ] _prepare_wagon_mesh_verts(verts,
+    │                                    #     target_length_mm) — центрирует bbox в
+    │                                    #     origin и равномерно масштабирует так,
+    │                                    #     чтобы самая длинная ось совпала с
+    │                                    #     длиной вагона; пропорции сохраняются.
+    │                                    #     Соглашение об ориентации модели:
+    │                                    #     X = вдоль вагона, Y = поперёк, Z = вверх
+    │                                    #
+    │                                    #   ── DKP visuals ──────────────────────────
+    │                                    #   _DKPVisual — shaft + diamond head + halo +
+    │                                    #     счётчик осей (Text); flash() / reset_flash()
+    │                                    #     / reset_counter()
+    │                                    #
+    │                                    #   ── SceneWindow ──────────────────────────
+    │                                    #   VisPy SceneCanvas — TurntableCamera,
+    │                                    #   _init_ground_grid() — сетка пола,
+    │                                    #   _init_tracks() — рельсы + шпалы + метка пути,
+    │                                    #   _init_dkp_markers() — _DKPVisual per sensor,
+    │                                    #   _init_wagon_visuals() — для каждого вагона
+    │                                    #     вызывает _make_wagon_visual() и добавляет
+    │                                    #     маркеры осей; затем строит coupler_line.
+    │                                    #
+    │                                    #   [NEW OBJ] _make_wagon_visual(wagon, ...) —
+    │                                    #     если wagon.model_path задан и _load_obj_mesh
+    │                                    #     вернул геометрию → visuals.Mesh с
+    │                                    #     shading='smooth', цвет _WAGON_BODY;
+    │                                    #     иначе → исходный visuals.Box.
+    │                                    #     Оба варианта получают одинаковый
+    │                                    #     MatrixTransform (rotate Z + translate),
+    │                                    #     поэтому _on_tick() работает единообразно.
+    │                                    #
+    │                                    #   _on_tick(state) — boundary check,
+    │                                    #     обновление позиций каждого _wagon_visuals[i],
+    │                                    #     маркеров осей и coupler_line + HUD,
+    │                                    #   _check_boundary() — пауза при выходе за концы,
+    │                                    #   _coupler_points() — полилиния по торцам,
+    │                                    #   _on_dkp_triggered() — вспышка 320 мс,
     │                                    #   _on_step_changed() / _on_sim_finished(),
     │                                    #   Кнопки: Пуск / Пауза (тоггл) / Стоп;
     │                                    #   4 состояния: Idle / Running / Paused / Done;
     │                                    #   canvas @property — для MP4-экспорта (раздел 5)
+    │                                    #
+    │                                    #   Зависимости: vispy + pyopengl (обязательны);
+    │                                    #     trimesh (опционально, улучшает совместимость
+    │                                    #     OBJ; без него работает встроенный парсер)
     ├── pages/
     │   ├── __init__.py
     │   ├── base_page.py                 # BasePage(QWidget) — абстрактный контракт
@@ -61,11 +125,19 @@ chameleon/
     │   ├── dkp_page.py                  # DkpPage — редактор ДКП;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     │   ├── sostav_page.py               # SostavPage — редактор состава;
-    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
+    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы];
+    │   │                                #   скрытая колонка _COL_MODEL хранит model_path,
+    │   │                                #   заполняется из WagonsDialog.selected_model
     │   └── scenario_page.py             # ScenarioPage — список сценариев;
     │                                    #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     └── dialogs/
         ├── __init__.py
         ├── scenario_steps_dialog.py     # ScenarioStepsDialog — шаги сценария;
         │                                #   get_steps() / set_steps() [4.2 ✓ уже реализованы]
-        └── wagons_dialog.py             # WagonsDialog — браузер вагонов
+        └── wagons_dialog.py             # WagonsDialog — браузер вагонов;
+                                         #   поле model_path (.obj) выбирается кнопкой
+                                         #   «Выбрать .obj» → QFileDialog;
+                                         #   путь сохраняется в wagon_library.json
+                                         #   через storage.wagon_repository и
+                                         #   передаётся в SostavPage → WagonDef.model_path →
+                                         #   _make_wagon_visual() → VisPy Mesh

@@ -20,14 +20,33 @@ Changes in this version:
       all wagon junction points (rear of wagon i = front of wagon i+1).
       Updated every tick along with wagon positions.
 
+  [5] OBJ 3-D MODELS — if a wagon's WagonDef has a non-empty model_path
+      that points to a readable .obj file, the wagon is rendered as a
+      VisPy Mesh built from that file's geometry.  The mesh is:
+          • centered at the model's bounding-box center,
+          • uniformly scaled so its longest axis matches wagon.length_mm,
+          • oriented assuming X = length (forward), Y = width, Z = up
+            (standard rail-asset convention).
+      If the file is missing, unreadable, or the parser fails for any
+      reason, the wagon falls back to the original Box rendering
+      silently — the simulation always runs.
+
+      OBJ loading uses a built-in minimal parser (vertices + triangular
+      faces only); no external dependency is required.  If `trimesh`
+      is available it is used preferentially for robustness on complex
+      files (quads, negative indices, materials, groups).
+
 Dependencies:
   pip install vispy pyopengl
+  pip install trimesh           # optional, improves OBJ compatibility
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional
+import os
+import logging
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -96,6 +115,221 @@ _AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
 _TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
 
 _DKP_FLASH_MS   = 320
+
+_LOG = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  [5] OBJ loader + per-wagon mesh helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-process cache: absolute_path → (vertices Nx3 float32, faces Mx3 uint32)
+# Populated lazily on first request; entries persist until the process exits.
+_OBJ_CACHE: Dict[str, Optional[Tuple[np.ndarray, np.ndarray]]] = {}
+
+# Optional trimesh — preferred when available because it handles a wider
+# range of OBJ dialects (quads, negative indices, groups, materials).
+try:
+    import trimesh as _trimesh
+    _HAS_TRIMESH = True
+except Exception:
+    _trimesh = None
+    _HAS_TRIMESH = False
+
+
+def _load_obj_mesh(path: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Load *path* and return (vertices, faces) or None on failure.
+
+    Vertices are float32, shape (N, 3).  Faces are uint32, shape (M, 3) —
+    polygons are triangulated by fan from the first vertex of the face.
+
+    The result is cached so that repeated calls (one per wagon) are cheap.
+    Failures are cached as None so the warning is logged only once per path.
+    """
+    if not path:
+        return None
+
+    abs_path = os.path.abspath(path)
+    if abs_path in _OBJ_CACHE:
+        return _OBJ_CACHE[abs_path]
+
+    if not os.path.isfile(abs_path):
+        _LOG.warning("OBJ file not found, falling back to Box: %s", abs_path)
+        _OBJ_CACHE[abs_path] = None
+        return None
+
+    # ── Preferred path: trimesh ────────────────────────────────────────
+    if _HAS_TRIMESH:
+        try:
+            mesh = _trimesh.load(abs_path, force="mesh", process=False)
+            if (mesh is not None
+                    and hasattr(mesh, "vertices")
+                    and hasattr(mesh, "faces")
+                    and len(mesh.vertices) > 0
+                    and len(mesh.faces) > 0):
+                verts = np.asarray(mesh.vertices, dtype=np.float32)
+                faces = np.asarray(mesh.faces, dtype=np.uint32)
+                _OBJ_CACHE[abs_path] = (verts, faces)
+                return _OBJ_CACHE[abs_path]
+        except Exception as exc:
+            _LOG.warning(
+                "trimesh failed to load %s (%s); falling back to built-in parser.",
+                abs_path, exc,
+            )
+
+    # ── Fallback: built-in minimal OBJ parser ──────────────────────────
+    try:
+        result = _parse_obj_simple(abs_path)
+    except Exception as exc:
+        _LOG.warning("Failed to parse OBJ %s: %s", abs_path, exc)
+        result = None
+
+    _OBJ_CACHE[abs_path] = result
+    return result
+
+
+def _parse_obj_simple(path: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Minimal pure-Python OBJ parser.
+
+    Handles:
+      • ``v x y z``    — vertex positions (extra components ignored).
+      • ``f a b c …``  — face entries; tokens may be ``v``, ``v/vt``,
+        ``v/vt/vn``, or ``v//vn``; only the vertex index is used.
+      • Negative indices (OBJ spec): -1 = last vertex defined so far.
+      • Polygon faces with > 3 vertices are triangulated as a fan from
+        the first vertex.
+
+    Ignores everything else (normals, texcoords, groups, materials, smoothing).
+    Returns (vertices, faces) or None if the file contains no usable geometry.
+    """
+    verts: List[Tuple[float, float, float]] = []
+    faces: List[Tuple[int, int, int]] = []
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split()
+            head = parts[0]
+
+            if head == "v" and len(parts) >= 4:
+                try:
+                    verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                except ValueError:
+                    continue
+
+            elif head == "f" and len(parts) >= 4:
+                # Resolve every token to a 0-based vertex index.
+                idx: List[int] = []
+                for tok in parts[1:]:
+                    first = tok.split("/", 1)[0]
+                    if not first:
+                        continue
+                    try:
+                        i = int(first)
+                    except ValueError:
+                        continue
+                    if i > 0:
+                        idx.append(i - 1)        # OBJ is 1-based
+                    elif i < 0:
+                        idx.append(len(verts) + i)  # negative = from end
+                    # i == 0 is invalid; skip silently
+
+                # Triangulate as a fan from the first vertex.
+                if len(idx) >= 3:
+                    for k in range(1, len(idx) - 1):
+                        faces.append((idx[0], idx[k], idx[k + 1]))
+
+    if not verts or not faces:
+        return None
+
+    vert_arr = np.asarray(verts, dtype=np.float32)
+    face_arr = np.asarray(faces, dtype=np.uint32)
+
+    # Defensive: drop face entries that reference out-of-range indices.
+    n = len(vert_arr)
+    valid = (face_arr >= 0).all(axis=1) & (face_arr < n).all(axis=1)
+    face_arr = face_arr[valid]
+    if len(face_arr) == 0:
+        return None
+
+    return vert_arr, face_arr
+
+
+def _orient_and_scale_obj(
+    verts: np.ndarray,
+    target_length_mm: float,
+) -> np.ndarray:
+    """Reorient + scale + ground a wagon mesh for the scene's coordinate system.
+
+    The scene uses **world X = along the track**, **world Z = up**.  An OBJ
+    file has no canonical axis convention, so we detect it from the
+    bounding-box extents:
+
+      • the LONGEST  axis → mapped to X (wagon length, along track)
+      • the SHORTEST axis → mapped to Y (wagon width, across track)
+      • the MEDIUM   axis → mapped to Z (wagon height, vertical)
+
+    Empirically this orientation matches typical rail-car OBJ exports:
+    the barrel/body's longest dimension lies along the track, the thin
+    profile faces sideways across the gauge, and the taller cross-axis
+    (with running boards, brake gear, ladders) points up.
+
+    (An earlier version mapped medium → Y / shortest → Z, but for the
+    cistern asset that left the wagon rolled 90° around its own axis
+    with the underframe showing on top.  This convention puts the
+    underframe at the bottom and the dome on top.)
+
+    After remapping, the mesh is:
+      • uniformly scaled so its new X-extent equals *target_length_mm*
+        (Y, Z scale by the same factor so proportions are preserved),
+      • centered on origin in X and Y,
+      • shifted UP so its lowest point sits at z = 0 (wagon base on rails).
+
+    The caller then only needs to translate by (x_world, y_world, z_rail).
+    """
+    if verts.size == 0:
+        return verts
+
+    bb_min = verts.min(axis=0)
+    bb_max = verts.max(axis=0)
+    extents = bb_max - bb_min
+
+    # Order axes by extent: ascending → [shortest, medium, longest].
+    order = list(np.argsort(extents))
+    longest_ax  = order[2]
+    medium_ax   = order[1]
+    shortest_ax = order[0]
+
+    # Permutation: longest → X (length), shortest → Y (width), medium → Z (height).
+    perm = [longest_ax, shortest_ax, medium_ax]
+    permuted = verts[:, perm].astype(np.float32)
+
+    # Recompute bbox in the permuted frame.
+    pmin = permuted.min(axis=0)
+    pmax = permuted.max(axis=0)
+    pext = pmax - pmin
+
+    # Uniform scale by the new X extent so wagon length matches the slot.
+    new_length = float(pext[0])
+    if new_length > 1e-6 and target_length_mm > 0:
+        scale = target_length_mm / new_length
+        permuted = permuted * scale
+        pmin = pmin * scale
+        pmax = pmax * scale
+        pext = pext * scale
+
+    # Center on X and Y, ground on Z (lowest point at z = 0).
+    cx = (pmin[0] + pmax[0]) * 0.5
+    cy = (pmin[1] + pmax[1]) * 0.5
+    z_floor = pmin[2]
+    permuted[:, 0] -= cx
+    permuted[:, 1] -= cy
+    permuted[:, 2] -= z_floor
+
+    return permuted.astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,7 +545,11 @@ class SceneWindow(QMainWindow):
 
         # Runtime-updated scene objects
         self._dkp_visuals:   Dict[str, _DKPVisual] = {}
-        self._wagon_visuals: List[visuals.Box]       = []
+        # Each entry is either a visuals.Box (fallback) or a visuals.Mesh (OBJ).
+        self._wagon_visuals: List[object]            = []
+        # Per-wagon vertical offset added to z_rail to position the visual:
+        #   Box → wagon_h/2 (centre to base);  Mesh → 0 (base already at z=0).
+        self._wagon_z_offsets: List[float]           = []
         self._axle_visuals:  List[visuals.Markers]   = []
         self._coupler_line:  Optional[visuals.Line]  = None   # [4]
 
@@ -469,30 +707,37 @@ class SceneWindow(QMainWindow):
             s_front = self._config.train.s0_mm - self._wagon_front_offsets[wi]
             s_rear  = s_front - wagon.length_mm
 
-            # [2] vertical offset: place box bottom on the rail surface
             wagon_h = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
             z_rail  = geom.rail_z((s_front + s_rear) / 2.0)
-            z_center = z_rail + wagon_h / 2.0   # box centre above rail plane
-
-            pf = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
-            pr = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
-            center = (pf + pr) * 0.5
 
             wagon_len = float(np.linalg.norm(
                 geom.s_to_xyz(s_front) - geom.s_to_xyz(s_rear)
             ))
             wagon_w = GAUGE_MM * 0.88
 
-            box = visuals.Box(
-                width=wagon_len, height=wagon_h, depth=wagon_w,
-                color=(*_WAGON_BODY[:3], 0.85), edge_color=_WAGON_EDGE,
-                parent=self._view.scene,
+            # [5] Build the visual (Mesh from .obj, or Box fallback) and
+            #     learn its local-Z base offset.
+            #       • Mesh: base is at local z=0  → z_base_offset = 0
+            #       • Box : centre is at local z=0 → z_base_offset = h/2
+            wagon_visual, z_base_offset = self._make_wagon_visual(
+                wagon=wagon,
+                wagon_len=wagon_len,
+                wagon_w=wagon_w,
+                wagon_h=wagon_h,
             )
+            self._wagon_z_offsets.append(z_base_offset)
+
+            # [2] Place the visual so its base sits on the rail surface.
+            z_center = z_rail + z_base_offset
+            pf = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
+            pr = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
+            center = (pf + pr) * 0.5
+
             t = vispy.scene.transforms.MatrixTransform()
             t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
             t.translate(center.astype(np.float64))
-            box.transform = t
-            self._wagon_visuals.append(box)
+            wagon_visual.transform = t
+            self._wagon_visuals.append(wagon_visual)
 
             # Axle wheel markers — sit at rail level (z_rail)
             axle_pts = [
@@ -516,6 +761,66 @@ class SceneWindow(QMainWindow):
         )
 
     # ================================================================== #
+    #  [5] Wagon visual factory — Mesh from .obj or Box fallback         #
+    # ================================================================== #
+
+    def _make_wagon_visual(
+        self,
+        wagon:     WagonDef,
+        wagon_len: float,
+        wagon_w:   float,
+        wagon_h:   float,
+    ):
+        """Return (visual, z_base_offset) for one wagon.
+
+        * If wagon.model_path points to a readable .obj file → returns a
+          visuals.Mesh whose vertices have been reoriented (longest axis →
+          world X), uniformly scaled (X-extent = wagon_len), centered in
+          X/Y, and shifted so the base sits at local z = 0.
+          z_base_offset is then **0** — the per-tick translate just adds
+          z_rail and the wagon stands ON the rails.
+
+        * Otherwise → returns the original visuals.Box of dimensions
+          wagon_len × wagon_h × wagon_w, with its centre at local origin.
+          z_base_offset is **wagon_h / 2** so the per-tick translate adds
+          (z_rail + wagon_h/2) to put the box bottom on the rails.
+
+        The returned visual is already parented to self._view.scene; the
+        caller still needs to assign its .transform.
+        """
+        model_path = getattr(wagon, "model_path", "") or ""
+
+        if model_path:
+            mesh_data = _load_obj_mesh(model_path)
+            if mesh_data is not None:
+                verts_raw, faces = mesh_data
+                verts = _orient_and_scale_obj(verts_raw, target_length_mm=wagon_len)
+                try:
+                    mesh = visuals.Mesh(
+                        vertices=verts,
+                        faces=faces,
+                        color=(*_WAGON_BODY[:3], 1.0),
+                        shading="smooth",
+                        parent=self._view.scene,
+                    )
+                    # Mesh base already at local z=0 — no extra lift needed.
+                    return mesh, 0.0
+                except Exception as exc:
+                    _LOG.warning(
+                        "VisPy Mesh construction failed for %s (%s); "
+                        "using Box fallback.",
+                        model_path, exc,
+                    )
+
+        # Fallback — original Box rendering, centred at local origin.
+        box = visuals.Box(
+            width=wagon_len, height=wagon_h, depth=wagon_w,
+            color=(*_WAGON_BODY[:3], 0.85), edge_color=_WAGON_EDGE,
+            parent=self._view.scene,
+        )
+        return box, wagon_h / 2.0
+
+    # ================================================================== #
     #  Engine signal handlers                                             #
     # ================================================================== #
 
@@ -532,10 +837,12 @@ class SceneWindow(QMainWindow):
             s_front = state.s_head_mm - self._wagon_front_offsets[wi]
             s_rear  = s_front - wagon.length_mm
 
-            # [2] Correct vertical placement
-            wagon_h  = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
+            # [2] Correct vertical placement — Mesh's base is already at
+            # local z=0, Box's centre is at local z=0; the offset stored
+            # in _wagon_z_offsets handles both cases uniformly.
             z_rail   = geom.rail_z((s_front + s_rear) / 2.0)
-            z_center = z_rail + wagon_h / 2.0
+            z_offset = self._wagon_z_offsets[wi] if wi < len(self._wagon_z_offsets) else 0.0
+            z_center = z_rail + z_offset
 
             pf     = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
             pr     = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)

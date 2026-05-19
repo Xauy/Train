@@ -58,11 +58,12 @@ class WagonDef:
     axles must contain at least 2 entries and be ordered front-to-rear.
     No axle offset may exceed length_mm.
     """
-    wagon_id:  str
-    name:      str
-    length_mm: float
-    height_mm: float
-    axles:     List[AxleDef]
+    wagon_id:   str
+    name:       str
+    length_mm:  float
+    height_mm:  float
+    axles:      List[AxleDef]
+    model_path: str = ""   # optional path to a 3-D asset (.obj); empty → fallback Box
 
     def __post_init__(self) -> None:
         if self.length_mm <= 0:
@@ -82,21 +83,23 @@ class WagonDef:
 
     def to_dict(self) -> dict:
         return {
-            "wagon_id":  self.wagon_id,
-            "name":      self.name,
-            "length_mm": self.length_mm,
-            "height_mm": self.height_mm,
-            "axles":     [a.to_dict() for a in self.axles],
+            "wagon_id":   self.wagon_id,
+            "name":       self.name,
+            "length_mm":  self.length_mm,
+            "height_mm":  self.height_mm,
+            "axles":      [a.to_dict() for a in self.axles],
+            "model_path": self.model_path,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "WagonDef":
         return cls(
-            wagon_id=  str(d["wagon_id"]),
-            name=      str(d["name"]),
-            length_mm= float(d["length_mm"]),
-            height_mm= float(d["height_mm"]),
-            axles=     [AxleDef.from_dict(a) for a in d["axles"]],
+            wagon_id=   str(d["wagon_id"]),
+            name=       str(d["name"]),
+            length_mm=  float(d["length_mm"]),
+            height_mm=  float(d["height_mm"]),
+            axles=      [AxleDef.from_dict(a) for a in d["axles"]],
+            model_path= str(d.get("model_path", "")),
         )
 
 
@@ -184,11 +187,12 @@ class TrainConfig:
                         for a in reversed(template.axles)
                     ]
                     result.append(WagonDef(
-                        wagon_id=  template.wagon_id + "_rev",
-                        name=      template.name + " (обратно)",
-                        length_mm= template.length_mm,
-                        height_mm= template.height_mm,
-                        axles=     mirrored_axles,
+                        wagon_id=   template.wagon_id + "_rev",
+                        name=       template.name + " (обратно)",
+                        length_mm=  template.length_mm,
+                        height_mm=  template.height_mm,
+                        axles=      mirrored_axles,
+                        model_path= template.model_path,
                     ))
         return result
 

@@ -253,11 +253,12 @@ class MainWindow(QMainWindow):
 
             if wagon_id not in wagon_library:
                 wagon_library[wagon_id] = WagonDef(
-                    wagon_id=  wagon_id,
-                    name=      str(row.get("name", wagon_id)),
-                    length_mm= length_mm,
-                    height_mm= height_mm,
-                    axles=     axles,
+                    wagon_id=   wagon_id,
+                    name=       str(row.get("name", wagon_id)),
+                    length_mm=  length_mm,
+                    height_mm=  height_mm,
+                    axles=      axles,
+                    model_path= str(row.get("model_path", "")).strip(),
                 )
 
             wagon_sequence.append(WagonSlot(wagon_id=wagon_id, count=count))
