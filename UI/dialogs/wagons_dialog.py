@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTableWidget, QComboBox, QTableWidgetItem, QHeaderView, QMessageBox,
+    QTableWidget, QComboBox, QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
 )
 from storage.wagon_repository import load_wagons, save_wagons
 
@@ -20,7 +20,8 @@ _COL_TYPE    = 2
 _COL_BASE    = 3
 _COL_LENGTH  = 4
 _COL_HEIGHT  = 5
-_COL_DELETE  = 6
+_COL_MODEL   = 6
+_COL_DELETE  = 7
 
 
 class WagonsDialog(QDialog):
@@ -34,10 +35,10 @@ class WagonsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "ID", "Название", "Тип", "База", "Длина",
-            "Высота", "",
+            "Высота", "3d модель (путь)", "",
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
@@ -57,6 +58,7 @@ class WagonsDialog(QDialog):
         self.selected_base: str | None = None
         self.selected_length: str | None = None
         self.selected_height: str | None = None
+        self.selected_model: str | None = None
 
         self.add_btn.clicked.connect(self._add_wagon)
         self.select_btn.clicked.connect(self._select_wagon)
@@ -80,10 +82,10 @@ class WagonsDialog(QDialog):
         """Extract all rows from the table and save them to the JSON file."""
         wagons = []
         for row in range(self.table.rowCount()):
-            # Получаем текст из QComboBox (тип вагона)
             combo = self.table.cellWidget(row, _COL_TYPE)
             wagon_type = combo.currentText() if combo else "Цистерна"
-
+            model_btn = self.table.cellWidget(row, _COL_MODEL)
+            model_path = model_btn.text() if model_btn else ""
             wagons.append({
                 "id": self._text(row, _COL_ID),
                 "name": self._text(row, _COL_NAME),
@@ -91,6 +93,7 @@ class WagonsDialog(QDialog):
                 "base": self._text(row, _COL_BASE),
                 "length": self._text(row, _COL_LENGTH),
                 "height": self._text(row, _COL_HEIGHT),
+                "model_path": model_path,
             })
         save_wagons(wagons)
 
@@ -100,7 +103,7 @@ class WagonsDialog(QDialog):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ #
-    #  Row helpers                                                        #
+    #  Row helpers                                                         #
     # ------------------------------------------------------------------ #
 
     def _add_row_from_data(self, data: dict) -> None:
@@ -113,6 +116,10 @@ class WagonsDialog(QDialog):
         self.table.setItem(row, _COL_BASE, QTableWidgetItem(data.get("base", "")))
         self.table.setItem(row, _COL_LENGTH, QTableWidgetItem(data.get("length", "")))
         self.table.setItem(row, _COL_HEIGHT, QTableWidgetItem(data.get("height", "")))
+
+        model_btn = QPushButton(data.get("model_path", "") or "Выбрать .obj")
+        model_btn.clicked.connect(self._choose_model)
+        self.table.setCellWidget(row, _COL_MODEL, model_btn)
 
         # QComboBox для типа вагона
         combo = QComboBox()
@@ -137,6 +144,16 @@ class WagonsDialog(QDialog):
         """Add an empty row (user will fill it in)."""
         self._add_row_from_data({})
 
+    def _choose_model(self) -> None:
+        """Открыть проводник для выбора файла .obj и записать путь в кнопку."""
+        btn = self.sender()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать 3D-модель", "",
+            "OBJ Files (*.obj);;All Files (*)"
+        )
+        if file_path:
+            btn.setText(file_path)
+
     def _delete_wagon(self) -> None:
         """Find the row that owns the clicked button and remove it."""
         btn = self.sender()
@@ -155,7 +172,9 @@ class WagonsDialog(QDialog):
         base_item = self.table.item(current_row, _COL_BASE)
         length_item = self.table.item(current_row, _COL_LENGTH)
         height_item = self.table.item(current_row, _COL_HEIGHT)
-
+        model_btn = self.table.cellWidget(current_row, _COL_MODEL)
+        model_path = model_btn.text() if model_btn else ""
+        self.selected_model = model_path
         self._save_to_repository()
 
         self.selected_id = id_item.text() if id_item else ""

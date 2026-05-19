@@ -28,7 +28,7 @@ _COL_BASE   = 3
 _COL_LENGTH = 4
 _COL_HEIGHT = 5
 _COL_DELETE = 6
-
+_COL_MODEL = 7
 
 class SostavPage(BasePage):
     """QWidget that lets the user assemble a train composition."""
@@ -39,16 +39,17 @@ class SostavPage(BasePage):
 
         # ── Composition table ──────────────────────────────────────────
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Номер в составе", "Название", "Кол-во",
-            "База", "Длина", "Высота", "Удалить",
+            "База", "Длина", "Высота", "Удалить", "3D модель"
         ])
+        self.table.setColumnHidden(_COL_MODEL, True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
         add_btn = QPushButton("Добавить элемент состава")
-        add_btn.clicked.connect(self.add_row)
+        add_btn.clicked.connect(lambda: self.add_row({}))
         layout.addWidget(add_btn)
 
         # ── Info panel ────────────────────────────────────────────────
@@ -103,6 +104,10 @@ class SostavPage(BasePage):
         del_btn.clicked.connect(self._delete_row)
         self.table.setCellWidget(row, _COL_DELETE, del_btn)
 
+        # model_path: сохраняем как скрытый элемент
+        model_path = record.get("model_path", "")
+        self._set_read_only_item(row, _COL_MODEL, model_path)
+
     # ------------------------------------------------------------------ #
     #  BasePage interface                                                   #
     # ------------------------------------------------------------------ #
@@ -118,6 +123,7 @@ class SostavPage(BasePage):
                 "base":   self._text(row, _COL_BASE),
                 "length": self._text(row, _COL_LENGTH),
                 "height": self._text(row, _COL_HEIGHT),
+                "model_path": self._text(row, _COL_MODEL),
             })
         return rows
 
@@ -146,6 +152,7 @@ class SostavPage(BasePage):
             self._set_read_only_item(row, _COL_BASE,   dlg.selected_base   or "")
             self._set_read_only_item(row, _COL_LENGTH, dlg.selected_length or "")
             self._set_read_only_item(row, _COL_HEIGHT, dlg.selected_height or "")
+            self._set_read_only_item(row, _COL_MODEL, dlg.selected_model or "")
 
     def _delete_row(self) -> None:
         """Find the row that owns the clicked button and remove it."""
