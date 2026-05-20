@@ -106,6 +106,11 @@ class SimulationEngine(QObject):
         # Append-only event log for the current run.
         self._event_log: List[DKPEvent] = []
 
+        # Tracks which (sensor_id, wagon_index, axle_index) triples have
+        # already fired in the current run.  Used to enforce the
+        # "once per axle per sensor" rule (plan: point trigger).
+        self._dkp_fired: set[tuple[str, int, int]] = set()
+
         # Qt timer — interval set from config; connected to _tick.
         self._timer = QTimer(self)
         self._timer.setInterval(config.dt_ms)
@@ -245,6 +250,7 @@ class SimulationEngine(QObject):
         self._direction       = cfg.train.direction
         self._s_head_mm       = cfg.train.s0_mm
         self._event_log       = []
+        self._dkp_fired.clear()
 
         # Seed v from the first step's v0, if steps exist.
         self._v_mms = cfg.steps[0].v0_mms if cfg.steps else 0.0
@@ -316,37 +322,47 @@ class SimulationEngine(QObject):
             new_s.append(axle_curr)
 
         # ── Step Д: check DKP triggers ─────────────────────────────────
+        #
+        # Each sensor is a point trigger at s = dkp.s_mm.  An axle fires
+        # the sensor at most once per simulation run, on the tick when
+        # its position crosses that point.  We detect a crossing by
+        # checking whether s = dkp.s_mm lies in the half-open interval
+        # spanned by the axle's previous and current positions:
+        #
+        #   LeftToRight (s increasing):   s_prev <= s_mm < s_curr
+        #   RightToLeft (s decreasing):   s_curr < s_mm <= s_prev
+        #
+        # A stationary axle (s_prev == s_curr) cannot cross anything and
+        # is skipped automatically.  Each (sensor, wagon, axle) triple is
+        # remembered in self._dkp_fired so subsequent passes — including
+        # an axle that crosses, comes back, and crosses again — do not
+        # re-trigger.  The fired set is cleared by _reset_state().
         for dkp in cfg.dkps:
             if not dkp.enabled:
                 continue
 
-            zone_lo = dkp.zone_lo
-            zone_hi = dkp.zone_hi
+            trigger_s = dkp.s_mm
+            no_filter = dkp.direction_filter == "Both"
 
             for wi, wagon in enumerate(self._wagons):
                 for aj, axle in enumerate(wagon.axles):
+                    key = (dkp.sensor_id, wi, aj)
+                    if key in self._dkp_fired:
+                        continue
+
                     s_prev = self._s_prev[wi][aj]
                     s_curr = new_s[wi][aj]
 
-                    # Check overlap of the axle's travel interval with [zone_lo, zone_hi].
-                    travel_lo = min(s_prev, s_curr)
-                    travel_hi = max(s_prev, s_curr)
-                    crossed = travel_lo <= zone_hi and travel_hi >= zone_lo
-
-                    if not crossed:
-                        continue
-
-                    # Determine crossing direction.
-                    if s_curr > s_prev:
+                    # Detect a directional crossing of the trigger point.
+                    if s_prev <= trigger_s < s_curr:
                         crossing_dir = "LeftToRight"
-                    elif s_curr < s_prev:
+                    elif s_curr < trigger_s <= s_prev:
                         crossing_dir = "RightToLeft"
                     else:
-                        # Axle is stationary inside the zone — no new event.
                         continue
 
                     # Apply direction filter.
-                    if dkp.direction_filter != "Any" and dkp.direction_filter != crossing_dir:
+                    if not no_filter and dkp.direction_filter != crossing_dir:
                         continue
 
                     event = DKPEvent(
@@ -360,6 +376,7 @@ class SimulationEngine(QObject):
                         s_axis_mm=   s_curr,
                     )
                     self._event_log.append(event)
+                    self._dkp_fired.add(key)
                     self.dkp_triggered.emit(event)
 
         # Commit new positions and head coordinate.

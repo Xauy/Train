@@ -34,12 +34,21 @@ chameleon/
 │
 ├── physics/
 │   ├── __init__.py
-│   ├── models.py                        # [DONE 2.2–2.3, UPDATED OBJ] AxleDef, WagonDef,
-│   │                                    # WagonSlot, TrainConfig, DKPConfig, ScenarioStep,
-│   │                                    # SimConfig, AxisState, DKPEvent, SimState.
-│   │                                    # [NEW] WagonDef.model_path — путь к .obj-ассету
+│   ├── models.py                        # [DONE 2.2–2.3, UPDATED OBJ, UPDATED DKP-Point]
+│   │                                    # AxleDef, WagonDef, WagonSlot, TrainConfig,
+│   │                                    # DKPConfig, ScenarioStep, SimConfig,
+│   │                                    # AxisState, DKPEvent, SimState.
+│   │                                    # [OBJ] WagonDef.model_path — путь к .obj-ассету
 │   │                                    #   (опционально); сериализуется в to_dict/from_dict;
-│   │                                    #   сохраняется при mirrored-варианте в expand()
+│   │                                    #   сохраняется при mirrored-варианте в expand().
+│   │                                    # [DKP-Point] DKPConfig — точечный триггер:
+│   │                                    #   • поле zone_mm удалено;
+│   │                                    #   • direction_filter принимает значения
+│   │                                    #     'Both' / 'LeftToRight' / 'RightToLeft';
+│   │                                    #   • legacy-значение 'Any' автоматически
+│   │                                    #     нормализуется в 'Both' (__post_init__),
+│   │                                    #     legacy 'zone_mm' молча игнорируется
+│   │                                    #     в from_dict().
 │   ├── wagon_defaults.py                # [NEW] Сопоставление тип вагона → имя файла
 │   │                                    #   в папке models/.  Без Qt.
 │   │                                    #   Публичный API:
@@ -63,7 +72,8 @@ chameleon/
 │   │                                    #   API: open() / close() / log_event(DKPEvent),
 │   │                                    #   а также context-manager (__enter__/__exit__).
 │   │                                    #   Без Qt; используется SceneWindow.
-│   └── simulation_engine.py             # [DONE 2.4–2.6] SimulationEngine(QObject):
+│   └── simulation_engine.py             # [DONE 2.4–2.6, UPDATED DKP-Point]
+│                                        #   SimulationEngine(QObject):
 │                                        #   Signals: tick_updated, dkp_triggered,
 │                                        #            step_changed, sim_finished
 │                                        #   API: start(), pause(), resume(), stop(),
@@ -71,12 +81,25 @@ chameleon/
 │                                        #   Internal: _tick() — kinematics (Б),
 │                                        #     axis update (В–Г), DKP crossing (Д),
 │                                        #     step advance (Е), state emit (Ж)
-│                                        #   validate() — pre-start integrity checks
+│                                        #   validate() — pre-start integrity checks.
+│                                        #   [DKP-Point] Логика срабатывания ДКП:
+│                                        #     • точечный триггер: пересечение оси точки
+│                                        #       s = dkp.s_mm (полуоткрытый интервал
+│                                        #       [s_prev, s_curr) для LeftToRight,
+│                                        #       соответственно для RightToLeft);
+│                                        #     • self._dkp_fired:
+│                                        #       set[(sensor_id, wagon_idx, axle_idx)]
+│                                        #       обеспечивает срабатывание один раз
+│                                        #       на запуск; сбрасывается в _reset_state();
+│                                        #     • фильтр direction = 'Both' / 'LeftToRight'
+│                                        #       / 'RightToLeft' (без 'Any').
 │
 ├── validation/
 │   ├── __init__.py
-│   └── validators.py                    # validate_dkp_sensors(), validate_paths(),
-│                                        # validate_scenario_steps() — чистые функции без Qt
+│   └── validators.py                    # [UPDATED DKP-Point] validate_dkp_sensors(),
+│                                        # validate_paths(), validate_scenario_steps() —
+│                                        # чистые функции без Qt.  Проверка zone_mm
+│                                        # удалена (ДКП — точечный триггер).
 │
 └── ui/
     ├── __init__.py
@@ -175,8 +198,15 @@ chameleon/
     │   │                                #   to_dict() / from_dict()
     │   ├── paths_page.py                # PathsPage — редактор путей;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
-    │   ├── dkp_page.py                  # DkpPage — редактор ДКП;
-    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
+    │   ├── dkp_page.py                  # [UPDATED DKP-Point] DkpPage — редактор ДКП;
+    │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы].
+    │   │                                #   Колонки таблицы: sensor_id, track_id, s_mm,
+    │   │                                #   Тип системы (QComboBox Fox/Mongoose),
+    │   │                                #   Включён (QCheckBox), Направление
+    │   │                                #   (QComboBox: Both/LeftToRight/RightToLeft),
+    │   │                                #   Удалить.  Колонка zone_mm удалена.
+    │   │                                #   Legacy «Any» нормализуется в «Both» при загрузке;
+    │   │                                #   legacy «zone_mm» в JSON игнорируется.
     │   ├── sostav_page.py               # [UPDATED Axles] SostavPage — редактор состава;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы];
     │   │                                #   скрытые колонки:

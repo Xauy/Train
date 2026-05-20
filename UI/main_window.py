@@ -330,10 +330,9 @@ class MainWindow(QMainWindow):
                     sensor_id=        str(d.get("sensor_id", "")).strip(),
                     track_id=         str(d.get("track_id", track_id)).strip() or track_id,
                     s_mm=             float(d.get("s_mm", 0.0)),
-                    zone_mm=          max(1.0, float(d.get("zone_mm", 100.0))),
                     sensor_type=      str(d.get("sensor_type", "Fox")),
                     enabled=          bool(d.get("enabled", True)),
-                    direction_filter= str(d.get("direction_filter", "Any")),
+                    direction_filter= str(d.get("direction_filter", "Both")),
                 ))
             except (ValueError, TypeError) as exc:
                 raise ValueError(

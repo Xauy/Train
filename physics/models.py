@@ -223,27 +223,34 @@ class TrainConfig:
 class DKPConfig:
     """Static description of one trackside detection sensor (ДКП).
 
-    zone_mm is the full width of the detection zone centred on s_mm, so an
-    axle triggers the sensor when its position is in the interval
-      [s_mm - zone_mm/2 , s_mm + zone_mm/2].
+    The sensor is a point trigger at ``s_mm`` along its path; each axle
+    fires the sensor at most once per simulation run, on the tick when
+    it crosses the point.
 
     direction_filter restricts which crossing directions generate an event:
-      'Any'         — both directions
+      'Both'        — both directions (default)
       'LeftToRight' — only when the axle moves toward higher s values
       'RightToLeft' — only when the axle moves toward lower s values
+
+    The legacy value 'Any' is accepted on load as a synonym for 'Both' so
+    older project files continue to work; new saves emit 'Both'.
     """
     sensor_id:        str
     track_id:         str
     s_mm:             float
-    zone_mm:          float
     sensor_type:      str   # 'Fox' | 'Mongoose'
     enabled:          bool
-    direction_filter: str   # 'Any' | 'LeftToRight' | 'RightToLeft'
+    direction_filter: str   # 'Both' | 'LeftToRight' | 'RightToLeft'
 
     _VALID_TYPES   = {"Fox", "Mongoose"}
-    _VALID_FILTERS = {"Any", "LeftToRight", "RightToLeft"}
+    _VALID_FILTERS = {"Both", "LeftToRight", "RightToLeft"}
+    _LEGACY_FILTER_ALIASES = {"Any": "Both"}
 
     def __post_init__(self) -> None:
+        # Normalise legacy filter values transparently.
+        if self.direction_filter in self._LEGACY_FILTER_ALIASES:
+            self.direction_filter = self._LEGACY_FILTER_ALIASES[self.direction_filter]
+
         if self.sensor_type not in self._VALID_TYPES:
             raise ValueError(
                 f"DKPConfig '{self.sensor_id}': sensor_type must be one of "
@@ -254,23 +261,12 @@ class DKPConfig:
                 f"DKPConfig '{self.sensor_id}': direction_filter must be one of "
                 f"{self._VALID_FILTERS}, got '{self.direction_filter}'"
             )
-        if self.zone_mm <= 0:
-            raise ValueError(f"DKPConfig '{self.sensor_id}': zone_mm must be > 0")
-
-    @property
-    def zone_lo(self) -> float:
-        return self.s_mm - self.zone_mm / 2
-
-    @property
-    def zone_hi(self) -> float:
-        return self.s_mm + self.zone_mm / 2
 
     def to_dict(self) -> dict:
         return {
             "sensor_id":        self.sensor_id,
             "track_id":         self.track_id,
             "s_mm":             self.s_mm,
-            "zone_mm":          self.zone_mm,
             "sensor_type":      self.sensor_type,
             "enabled":          self.enabled,
             "direction_filter": self.direction_filter,
@@ -278,14 +274,14 @@ class DKPConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DKPConfig":
+        # Legacy 'zone_mm' is ignored on load — point triggering replaces it.
         return cls(
             sensor_id=        str(d["sensor_id"]),
             track_id=         str(d["track_id"]),
             s_mm=             float(d["s_mm"]),
-            zone_mm=          float(d.get("zone_mm", 100.0)),
             sensor_type=      str(d.get("sensor_type", "Fox")),
             enabled=          bool(d.get("enabled", True)),
-            direction_filter= str(d.get("direction_filter", "Any")),
+            direction_filter= str(d.get("direction_filter", "Both")),
         )
 
 

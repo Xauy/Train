@@ -44,7 +44,8 @@ def validate_dkp_sensors(
       • s_mm must be parseable as a float.
       • s_mm must be ≥ 0.
       • If the sensor's track_id is known, s_mm must not exceed that path's length.
-      • zone_mm must be > 0.
+
+    (DKPs are point triggers — no zone size to validate.)
 
     Args:
         sensors:      List of dicts as produced by DkpPage.to_dict().
@@ -59,7 +60,6 @@ def validate_dkp_sensors(
         sensor_id = sensor.get("sensor_id") or f"строка {row + 1}"
         track_id  = sensor.get("track_id", "")
         raw_s     = sensor.get("s_mm", 0)
-        zone_mm   = sensor.get("zone_mm", 0)
 
         # ── s_mm ──────────────────────────────────────────────────────────
         try:
@@ -85,18 +85,6 @@ def validate_dkp_sensors(
                     f"[{sensor_id}] s_mm={s_mm} превышает длину пути "
                     f"'{track_id}' ({path_lengths[track_id]} мм)"
                 ),
-            ))
-
-        # ── zone_mm ───────────────────────────────────────────────────────
-        try:
-            zone = float(zone_mm)
-        except (TypeError, ValueError):
-            zone = 0.0
-
-        if zone <= 0:
-            errors.append(ValidationError(
-                row=row, field="zone_mm",
-                message=f"[{sensor_id}] zone_mm должен быть > 0",
             ))
 
     return errors
