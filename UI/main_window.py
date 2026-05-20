@@ -244,13 +244,26 @@ class MainWindow(QMainWindow):
             base_mm   = _safe_float(row.get("base",   18_000.0), 18_000.0)
             count     = max(1, int(_safe_float(row.get("count", 1), 1)))
 
-            # Derive two bogie axles from the base distance if no explicit
-            # axle data is available (the UI does not currently expose axles).
-            overhang = (length_mm - base_mm) / 2.0
-            axles = [
-                AxleDef(offset_mm=max(0.0, overhang)),
-                AxleDef(offset_mm=max(0.0, overhang + base_mm)),
-            ]
+            # Axles — priority order:
+            #   1. Explicit per-axle offsets configured in WagonsDialog
+            #      (passed through SostavPage → row["axles"]); use as-is.
+            #   2. Otherwise derive a 2-bogie default from base/length —
+            #      same behaviour as before per-axle config existed.
+            raw_axles = row.get("axles") or []
+            axles: List[AxleDef] = []
+            for entry in raw_axles:
+                if isinstance(entry, dict) and "offset_mm" in entry:
+                    try:
+                        axles.append(AxleDef(offset_mm=float(entry["offset_mm"])))
+                    except (TypeError, ValueError):
+                        pass
+
+            if not axles:
+                overhang = (length_mm - base_mm) / 2.0
+                axles = [
+                    AxleDef(offset_mm=max(0.0, overhang)),
+                    AxleDef(offset_mm=max(0.0, overhang + base_mm)),
+                ]
 
             if wagon_id not in wagon_library:
                 # Resolve the 3-D model: explicit path wins; otherwise fall

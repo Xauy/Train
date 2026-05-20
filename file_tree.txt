@@ -60,7 +60,8 @@ chameleon/
 │
 └── ui/
     ├── __init__.py
-    ├── main_window.py                   # [UPDATED 4.4 + 3.6 + OBJ + Defaults] MainWindow:
+    ├── main_window.py                   # [UPDATED 4.4 + 3.6 + OBJ + Defaults + Axles]
+    │                                    #   MainWindow:
     │                                    #   QMenuBar «Файл» (Новый/Открыть/Сохранить/
     │                                    #   Сохранить как), self._current_file,
     │                                    #   заголовок окна, делегирование в ProjectIO;
@@ -72,7 +73,10 @@ chameleon/
     │                                    #   row["model_path"] и row["type"] из SostavPage,
     │                                    #   передаёт их в resolve_model_path() и записывает
     │                                    #   итоговый путь в WagonDef.model_path
-    │                                    #   (явный путь → дефолт по типу → '' / Box)
+    │                                    #   (явный путь → дефолт по типу → '' / Box).
+    │                                    #   [Axles] Если row["axles"] непуст — оси берутся
+    │                                    #   из него; иначе сохраняется прежний 2-bogie
+    │                                    #   fallback от base/length (backwards-compat).
     ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ]
     │                                    #   SceneWindow(QMainWindow):
     │                                    #
@@ -148,28 +152,52 @@ chameleon/
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     │   ├── dkp_page.py                  # DkpPage — редактор ДКП;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
-    │   ├── sostav_page.py               # SostavPage — редактор состава;
+    │   ├── sostav_page.py               # [UPDATED Axles] SostavPage — редактор состава;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы];
     │   │                                #   скрытые колонки:
     │   │                                #     _COL_MODEL — model_path (.obj),
     │   │                                #     _COL_TYPE  — тип вагона (для дефолтной модели).
     │   │                                #   Обе заполняются из WagonsDialog
-    │   │                                #   (selected_model / selected_type)
+    │   │                                #   (selected_model / selected_type).
+    │   │                                #   Параллельное хранение self._row_axles:
+    │   │                                #   list[list[dict]] — оси на строку
+    │   │                                #   (как _steps_data в ScenarioPage).
+    │   │                                #   to_dict()["axles"] передаёт список осей
+    │   │                                #   в MainWindow._build_sim_config.
     │   └── scenario_page.py             # ScenarioPage — список сценариев;
     │                                    #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     └── dialogs/
         ├── __init__.py
         ├── scenario_steps_dialog.py     # ScenarioStepsDialog — шаги сценария;
         │                                #   get_steps() / set_steps() [4.2 ✓ уже реализованы]
-        └── wagons_dialog.py             # WagonsDialog — браузер вагонов;
-                                         #   поле model_path (.obj) выбирается кнопкой
-                                         #   «Выбрать .obj» → QFileDialog;
-                                         #   путь и тип вагона (QComboBox) сохраняются
-                                         #   в wagon_library.json через
-                                         #   storage.wagon_repository;
-                                         #   selected_id / selected_name / selected_type /
-                                         #   selected_base / selected_length /
-                                         #   selected_height / selected_model передаются
-                                         #   в SostavPage → MainWindow → resolve_model_path()
-                                         #   → WagonDef.model_path → _make_wagon_visual() →
-                                         #   VisPy Mesh
+        ├── axle_positions_dialog.py     # [NEW] AxlePositionsDialog — редактор положения
+        │                                #   осей одного вагона.  Принимает count и
+        │                                #   initial_axles=list[{"offset_mm": float}];
+        │                                #   на accept get_axles() возвращает обновлённый
+        │                                #   список.  Опционально wagon_length_mm —
+        │                                #   валидирует, что offset не превышает длину.
+        │                                #   Полностью развязан с WagonsDialog — работает
+        │                                #   с plain-dict’ами.
+        └── wagons_dialog.py             # [UPDATED Axles] WagonsDialog — браузер вагонов:
+                                         #   ── Колонки таблицы ─────────────────────
+                                         #   ID, Название, Тип, База, Длина, Высота,
+                                         #   Кол-во осей (QSpinBox 0–32),
+                                         #   Оси (QPushButton → AxlePositionsDialog),
+                                         #   3d модель (QPushButton → QFileDialog),
+                                         #   Удалить.
+                                         #   ── Параллельное хранение ───────────────
+                                         #   self._row_axles: list[list[dict]] — список
+                                         #   осей для каждой строки таблицы; синхронизируется
+                                         #   с QSpinBox (растёт/обрезается, сохраняя
+                                         #   существующие смещения).
+                                         #   ── Persistence ─────────────────────────
+                                         #   wagon_library.json теперь хранит для каждого
+                                         #   вагона поля "axle_count" и "axles".
+                                         #   Backwards-compat: старые файлы без этих ключей
+                                         #   читаются как axle_count=4, axles=[0,0,0,0].
+                                         #   ── Возвращаемые значения ───────────────
+                                         #   selected_id / _name / _type / _base / _length /
+                                         #   _height / _model / _axles (list[dict]) →
+                                         #   передаются в SostavPage._row_axles →
+                                         #   to_dict() → MainWindow → WagonDef.axles
+

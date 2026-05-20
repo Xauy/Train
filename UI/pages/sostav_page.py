@@ -76,6 +76,12 @@ class SostavPage(BasePage):
 
         layout.addLayout(info_layout)
 
+        # Parallel storage — one list[dict] of axles per table row.
+        # Same row index as the QTableWidget.  An empty list for a row
+        # means "no explicit axles configured" and downstream code will
+        # auto-derive a 2-bogie default from base/length.
+        self._row_axles: list[list[dict]] = []
+
     # ------------------------------------------------------------------ #
     #  Public                                                              #
     # ------------------------------------------------------------------ #
@@ -114,6 +120,17 @@ class SostavPage(BasePage):
         wagon_type = r.get("type", "")
         self._set_read_only_item(row, _COL_TYPE, wagon_type)
 
+        # Axles — parallel storage; normalise to list[{"offset_mm": float}].
+        raw_axles = r.get("axles", []) or []
+        axles: list[dict] = []
+        for entry in raw_axles:
+            if isinstance(entry, dict):
+                try:
+                    axles.append({"offset_mm": float(entry.get("offset_mm", 0.0))})
+                except (TypeError, ValueError):
+                    axles.append({"offset_mm": 0.0})
+        self._row_axles.append(axles)
+
     # ------------------------------------------------------------------ #
     #  BasePage interface                                                   #
     # ------------------------------------------------------------------ #
@@ -122,6 +139,7 @@ class SostavPage(BasePage):
         rows = []
         for row in range(self.table.rowCount()):
             btn = self.table.cellWidget(row, _COL_NUM)
+            axles = self._row_axles[row] if row < len(self._row_axles) else []
             rows.append({
                 "wagon_label": btn.text() if btn else "",
                 "name":   self._text(row, _COL_NAME),
@@ -131,11 +149,13 @@ class SostavPage(BasePage):
                 "height": self._text(row, _COL_HEIGHT),
                 "model_path": self._text(row, _COL_MODEL),
                 "type":   self._text(row, _COL_TYPE),
+                "axles":  [dict(a) for a in axles],   # defensive copy
             })
         return rows
 
     def from_dict(self, data: list[dict]) -> None:
         self.table.setRowCount(0)
+        self._row_axles.clear()
         for record in data:
             self.add_row(record)
 
@@ -161,6 +181,9 @@ class SostavPage(BasePage):
             self._set_read_only_item(row, _COL_HEIGHT, dlg.selected_height or "")
             self._set_read_only_item(row, _COL_MODEL, dlg.selected_model or "")
             self._set_read_only_item(row, _COL_TYPE,  dlg.selected_type  or "")
+            # Axles — defensive copy from the dialog.
+            if row < len(self._row_axles):
+                self._row_axles[row] = [dict(a) for a in (dlg.selected_axles or [])]
 
     def _delete_row(self) -> None:
         """Find the row that owns the clicked button and remove it."""
@@ -168,6 +191,8 @@ class SostavPage(BasePage):
         row = self._find_row(btn, _COL_DELETE)
         if row >= 0:
             self.table.removeRow(row)
+            if row < len(self._row_axles):
+                del self._row_axles[row]
 
     def _find_row(self, widget, col: int) -> int:
         """Return the row whose cell widget in *col* is *widget*, or -1."""
