@@ -55,6 +55,7 @@ class WagonsDialog(QDialog):
         # Набор возвращаемых значений
         self.selected_id: str | None = None
         self.selected_name: str | None = None
+        self.selected_type: str | None = None
         self.selected_base: str | None = None
         self.selected_length: str | None = None
         self.selected_height: str | None = None
@@ -169,6 +170,7 @@ class WagonsDialog(QDialog):
             return
         id_item = self.table.item(current_row, _COL_ID)
         name_item = self.table.item(current_row, _COL_NAME)
+        type_combo = self.table.cellWidget(current_row, _COL_TYPE)
         base_item = self.table.item(current_row, _COL_BASE)
         length_item = self.table.item(current_row, _COL_LENGTH)
         height_item = self.table.item(current_row, _COL_HEIGHT)
@@ -179,6 +181,7 @@ class WagonsDialog(QDialog):
 
         self.selected_id = id_item.text() if id_item else ""
         self.selected_name = name_item.text() if name_item else ""
+        self.selected_type = type_combo.currentText() if type_combo else ""
         self.selected_base = base_item.text() if base_item else ""
         self.selected_length = length_item.text() if length_item else ""
         self.selected_height = height_item.text() if height_item else ""

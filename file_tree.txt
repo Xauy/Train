@@ -1,6 +1,17 @@
 chameleon/
 ├── main.py                              # Точка входа: запускает QApplication + MainWindow
 │
+├── models/                              # [NEW] 3D-модели вагонов по умолчанию (.obj)
+│   ├── README.md                        #   Инструкция: какие файлы класть, под какими
+│   │                                    #     именами, в каком приоритете
+│   ├── cisterna.obj                     #   ── ожидаемые файлы (опциональные) ──
+│   ├── kryty.obj                        #   Если файл присутствует — он автоматически
+│   ├── poluvagon.obj                    #     используется для вагонов соответствующего
+│   ├── platforma.obj                    #     типа, у которых не задан явный путь.
+│   ├── dumpkar.obj                      #   Если отсутствует — fallback Box.
+│   ├── hopper.obj                       #   Сопоставление «тип → имя» хранится в
+│   └── transporter.obj                  #     physics/wagon_defaults.DEFAULT_MODEL_FILES.
+│
 ├── storage/
 │   ├── __init__.py
 │   ├── models.py                        # ProjectData, PathRecord, DKPRecord, WagonRecord,
@@ -21,6 +32,17 @@ chameleon/
 │   │                                    # [NEW] WagonDef.model_path — путь к .obj-ассету
 │   │                                    #   (опционально); сериализуется в to_dict/from_dict;
 │   │                                    #   сохраняется при mirrored-варианте в expand()
+│   ├── wagon_defaults.py                # [NEW] Сопоставление тип вагона → имя файла
+│   │                                    #   в папке models/.  Без Qt.
+│   │                                    #   Публичный API:
+│   │                                    #     • DEFAULT_MODEL_FILES — словарь
+│   │                                    #       {«Цистерна»: 'cisterna.obj', …}
+│   │                                    #     • default_model_path(wagon_type) →
+│   │                                    #       абс. путь, если файл существует, иначе None
+│   │                                    #     • resolve_model_path(explicit_path, wagon_type)
+│   │                                    #       — приоритет: явный путь → дефолт → ''
+│   │                                    #     • supported_wagon_types() / expected_filename()
+│   │                                    #   Используется MainWindow._build_sim_config.
 │   └── simulation_engine.py             # [DONE 2.4–2.6] SimulationEngine(QObject):
 │                                        #   Signals: tick_updated, dkp_triggered,
 │                                        #            step_changed, sim_finished
@@ -38,7 +60,7 @@ chameleon/
 │
 └── ui/
     ├── __init__.py
-    ├── main_window.py                   # [UPDATED 4.4 + 3.6 + OBJ] MainWindow:
+    ├── main_window.py                   # [UPDATED 4.4 + 3.6 + OBJ + Defaults] MainWindow:
     │                                    #   QMenuBar «Файл» (Новый/Открыть/Сохранить/
     │                                    #   Сохранить как), self._current_file,
     │                                    #   заголовок окна, делегирование в ProjectIO;
@@ -46,9 +68,11 @@ chameleon/
     │                                    #   _on_simulation_clicked() → SceneWindow,
     │                                    #   _build_sim_config() → SimConfig,
     │                                    #   _collect_path_data() → List[dict].
-    │                                    #   [NEW OBJ] _build_sim_config() читает
-    │                                    #   row["model_path"] из SostavPage и передаёт
-    │                                    #   его в конструктор WagonDef
+    │                                    #   [OBJ] _build_sim_config() читает
+    │                                    #   row["model_path"] и row["type"] из SostavPage,
+    │                                    #   передаёт их в resolve_model_path() и записывает
+    │                                    #   итоговый путь в WagonDef.model_path
+    │                                    #   (явный путь → дефолт по типу → '' / Box)
     ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ]
     │                                    #   SceneWindow(QMainWindow):
     │                                    #
@@ -126,8 +150,11 @@ chameleon/
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     │   ├── sostav_page.py               # SostavPage — редактор состава;
     │   │                                #   to_dict() / from_dict() [4.2 ✓ уже реализованы];
-    │   │                                #   скрытая колонка _COL_MODEL хранит model_path,
-    │   │                                #   заполняется из WagonsDialog.selected_model
+    │   │                                #   скрытые колонки:
+    │   │                                #     _COL_MODEL — model_path (.obj),
+    │   │                                #     _COL_TYPE  — тип вагона (для дефолтной модели).
+    │   │                                #   Обе заполняются из WagonsDialog
+    │   │                                #   (selected_model / selected_type)
     │   └── scenario_page.py             # ScenarioPage — список сценариев;
     │                                    #   to_dict() / from_dict() [4.2 ✓ уже реализованы]
     └── dialogs/
@@ -137,7 +164,12 @@ chameleon/
         └── wagons_dialog.py             # WagonsDialog — браузер вагонов;
                                          #   поле model_path (.obj) выбирается кнопкой
                                          #   «Выбрать .obj» → QFileDialog;
-                                         #   путь сохраняется в wagon_library.json
-                                         #   через storage.wagon_repository и
-                                         #   передаётся в SostavPage → WagonDef.model_path →
-                                         #   _make_wagon_visual() → VisPy Mesh
+                                         #   путь и тип вагона (QComboBox) сохраняются
+                                         #   в wagon_library.json через
+                                         #   storage.wagon_repository;
+                                         #   selected_id / selected_name / selected_type /
+                                         #   selected_base / selected_length /
+                                         #   selected_height / selected_model передаются
+                                         #   в SostavPage → MainWindow → resolve_model_path()
+                                         #   → WagonDef.model_path → _make_wagon_visual() →
+                                         #   VisPy Mesh

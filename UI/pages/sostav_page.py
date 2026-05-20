@@ -29,6 +29,7 @@ _COL_LENGTH = 4
 _COL_HEIGHT = 5
 _COL_DELETE = 6
 _COL_MODEL = 7
+_COL_TYPE  = 8   # hidden — needed so SceneWindow can resolve a default 3-D model
 
 class SostavPage(BasePage):
     """QWidget that lets the user assemble a train composition."""
@@ -39,12 +40,13 @@ class SostavPage(BasePage):
 
         # ── Composition table ──────────────────────────────────────────
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "Номер в составе", "Название", "Кол-во",
-            "База", "Длина", "Высота", "Удалить", "3D модель"
+            "База", "Длина", "Высота", "Удалить", "3D модель", "Тип",
         ])
         self.table.setColumnHidden(_COL_MODEL, True)
+        self.table.setColumnHidden(_COL_TYPE, True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
@@ -105,8 +107,12 @@ class SostavPage(BasePage):
         self.table.setCellWidget(row, _COL_DELETE, del_btn)
 
         # model_path: сохраняем как скрытый элемент
-        model_path = record.get("model_path", "")
+        model_path = r.get("model_path", "")
         self._set_read_only_item(row, _COL_MODEL, model_path)
+
+        # wagon type: скрытый элемент, используется для выбора модели по умолчанию
+        wagon_type = r.get("type", "")
+        self._set_read_only_item(row, _COL_TYPE, wagon_type)
 
     # ------------------------------------------------------------------ #
     #  BasePage interface                                                   #
@@ -124,6 +130,7 @@ class SostavPage(BasePage):
                 "length": self._text(row, _COL_LENGTH),
                 "height": self._text(row, _COL_HEIGHT),
                 "model_path": self._text(row, _COL_MODEL),
+                "type":   self._text(row, _COL_TYPE),
             })
         return rows
 
@@ -153,6 +160,7 @@ class SostavPage(BasePage):
             self._set_read_only_item(row, _COL_LENGTH, dlg.selected_length or "")
             self._set_read_only_item(row, _COL_HEIGHT, dlg.selected_height or "")
             self._set_read_only_item(row, _COL_MODEL, dlg.selected_model or "")
+            self._set_read_only_item(row, _COL_TYPE,  dlg.selected_type  or "")
 
     def _delete_row(self) -> None:
         """Find the row that owns the clicked button and remove it."""

@@ -42,6 +42,7 @@ from physics.models import (
     SimConfig, TrainConfig, DKPConfig, WagonDef, AxleDef,
     WagonSlot, ScenarioStep as PhysicsScenarioStep,
 )
+from physics.wagon_defaults import resolve_model_path
 from physics.simulation_engine import SimulationEngine
 from ui.scene_window import SceneWindow
 
@@ -252,13 +253,19 @@ class MainWindow(QMainWindow):
             ]
 
             if wagon_id not in wagon_library:
+                # Resolve the 3-D model: explicit path wins; otherwise fall
+                # back to the type's default in <project>/models/, if present.
+                resolved_model = resolve_model_path(
+                    explicit_path=str(row.get("model_path", "")),
+                    wagon_type=   str(row.get("type", "")),
+                )
                 wagon_library[wagon_id] = WagonDef(
                     wagon_id=   wagon_id,
                     name=       str(row.get("name", wagon_id)),
                     length_mm=  length_mm,
                     height_mm=  height_mm,
                     axles=      axles,
-                    model_path= str(row.get("model_path", "")).strip(),
+                    model_path= resolved_model,
                 )
 
             wagon_sequence.append(WagonSlot(wagon_id=wagon_id, count=count))
