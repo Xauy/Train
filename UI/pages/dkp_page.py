@@ -8,6 +8,15 @@ Responsibilities (this file):
   • Translate ValidationError objects from validation.validators into
     cell highlights.
 
+DKPs are POINT triggers — s_mm is the exact crossing position; there is
+no detection zone (no zone_mm column).  The «Направление» column is a
+dropdown with three values: LeftToRight, RightToLeft, Both.
+
+Legacy project files that still contain "zone_mm" or "Any" for
+direction are accepted transparently:
+  • zone_mm is ignored on load.
+  • "Any"  is normalised to "Both" by the QComboBox lookup.
+
 No validation logic lives here.
 """
 
@@ -28,13 +37,21 @@ _COL_S_MM       = 2
 _COL_TYPE       = 3
 _COL_ENABLED    = 4
 _COL_DIRECTION  = 5
-_COL_ZONE_MM    = 6
-_COL_DELETE     = 7
+_COL_DELETE     = 6
+
+_COLUMN_COUNT = 7
+
+# Direction-filter dropdown values, in display order.
+_DIRECTION_VALUES: tuple[str, ...] = ("Both", "LeftToRight", "RightToLeft")
+# Legacy values mapped to current ones (for old project files).
+_DIRECTION_ALIASES: dict[str, str] = {
+    "Any": "Both",
+    "":    "Both",
+}
 
 # Maps field names (from ValidationError) to column indices
 _FIELD_TO_COL: dict[str, int] = {
     "s_mm":    _COL_S_MM,
-    "zone_mm": _COL_ZONE_MM,
 }
 
 
@@ -46,10 +63,10 @@ class DkpPage(BasePage):
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(_COLUMN_COUNT)
         self.table.setHorizontalHeaderLabels([
             "sensor_id", "track_id", "s_mm",
-            "Тип системы", "Включён", "Направление", "zone_mm", "",
+            "Тип системы", "Включён", "Направление", "",
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
@@ -75,20 +92,26 @@ class DkpPage(BasePage):
         self.table.setItem(row, _COL_S_MM,
                            QTableWidgetItem(str(r.get("s_mm", 0))))
 
-        combo = QComboBox()
-        combo.addItems(["Fox", "Mongoose"])
-        idx = combo.findText(str(r.get("sensor_type", "Fox")))
-        combo.setCurrentIndex(max(idx, 0))
-        self.table.setCellWidget(row, _COL_TYPE, combo)
+        # Sensor type — fixed dropdown
+        type_combo = QComboBox()
+        type_combo.addItems(["Fox", "Mongoose"])
+        idx = type_combo.findText(str(r.get("sensor_type", "Fox")))
+        type_combo.setCurrentIndex(max(idx, 0))
+        self.table.setCellWidget(row, _COL_TYPE, type_combo)
 
+        # Enabled — checkbox
         chk = QCheckBox()
         chk.setChecked(bool(r.get("enabled", True)))
         self.table.setCellWidget(row, _COL_ENABLED, chk)
 
-        self.table.setItem(row, _COL_DIRECTION,
-                           QTableWidgetItem(str(r.get("direction_filter", ""))))
-        self.table.setItem(row, _COL_ZONE_MM,
-                           QTableWidgetItem(str(r.get("zone_mm", 100))))
+        # Direction filter — dropdown.  Legacy "Any" maps to "Both".
+        raw_dir = str(r.get("direction_filter", "Both"))
+        dir_value = _DIRECTION_ALIASES.get(raw_dir, raw_dir)
+        dir_combo = QComboBox()
+        dir_combo.addItems(_DIRECTION_VALUES)
+        d_idx = dir_combo.findText(dir_value)
+        dir_combo.setCurrentIndex(d_idx if d_idx >= 0 else 0)
+        self.table.setCellWidget(row, _COL_DIRECTION, dir_combo)
 
         del_btn = QPushButton("Удалить")
         del_btn.clicked.connect(self._delete_row)
@@ -114,16 +137,16 @@ class DkpPage(BasePage):
     def to_dict(self) -> list[dict]:
         rows = []
         for row in range(self.table.rowCount()):
-            combo = self.table.cellWidget(row, _COL_TYPE)
-            chk   = self.table.cellWidget(row, _COL_ENABLED)
+            type_combo = self.table.cellWidget(row, _COL_TYPE)
+            dir_combo  = self.table.cellWidget(row, _COL_DIRECTION)
+            chk        = self.table.cellWidget(row, _COL_ENABLED)
             rows.append({
                 "sensor_id":        self._text(row, _COL_SENSOR_ID),
                 "track_id":         self._text(row, _COL_TRACK_ID),
                 "s_mm":             self._float(row, _COL_S_MM),
-                "sensor_type":      combo.currentText() if combo else "Fox",
+                "sensor_type":      type_combo.currentText() if type_combo else "Fox",
                 "enabled":          chk.isChecked() if chk else True,
-                "direction_filter": self._text(row, _COL_DIRECTION),
-                "zone_mm":          self._float(row, _COL_ZONE_MM),
+                "direction_filter": dir_combo.currentText() if dir_combo else "Both",
             })
         return rows
 
