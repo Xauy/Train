@@ -72,6 +72,7 @@ except ImportError as _err:
 
 from physics.models import SimConfig, SimState, DKPEvent, WagonDef, DKPConfig
 from physics.simulation_engine import SimulationEngine
+from physics.dkp_logger import DKPEventLogger
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -566,6 +567,23 @@ class SceneWindow(QMainWindow):
         engine.step_changed.connect(self._on_step_changed)
         engine.sim_finished.connect(self._on_sim_finished)
 
+        # ── DKP event logging ──────────────────────────────────────────
+        # One run, three files (Fox / Mongoose / All), inside a fresh
+        # timestamped directory under <project>/logs/.  Built from the
+        # engine's expanded wagon list so the log shows human ids
+        # instead of opaque indices.
+        try:
+            wagon_ids = {i: w.wagon_id for i, w in enumerate(self._wagons)}
+            self._dkp_logger: Optional[DKPEventLogger] = DKPEventLogger(wagon_ids)
+            self._dkp_log_dir = self._dkp_logger.open()
+            _LOG.info("DKP events will be logged to %s", self._dkp_log_dir)
+        except OSError as exc:
+            # Disk full / permissions / read-only mount — never let logging
+            # break the simulation.  Just warn and continue without a logger.
+            _LOG.warning("Could not open DKP log files: %s", exc)
+            self._dkp_logger = None
+            self._dkp_log_dir = None
+
         self._set_state_idle()
 
     # ================================================================== #
@@ -878,6 +896,14 @@ class SceneWindow(QMainWindow):
         self._canvas.update()
 
     def _on_dkp_triggered(self, event: DKPEvent) -> None:
+        # Persist the event before any visual work — keeps logging
+        # robust if the rendering code later raises.
+        if self._dkp_logger is not None:
+            try:
+                self._dkp_logger.log_event(event)
+            except OSError as exc:
+                _LOG.warning("DKP log write failed: %s", exc)
+
         bundle = self._dkp_visuals.get(event.sensor_id)
         if bundle:
             bundle.flash()
@@ -896,6 +922,15 @@ class SceneWindow(QMainWindow):
     def _on_sim_finished(self) -> None:
         self._set_state_idle()
         self._clock_label.setText(_fmt_time(self._engine._t_ms))
+
+    def closeEvent(self, event) -> None:
+        """Flush and close DKP log files before the window goes away."""
+        if self._dkp_logger is not None:
+            try:
+                self._dkp_logger.close()
+            except OSError as exc:
+                _LOG.warning("Failed to close DKP log files: %s", exc)
+        super().closeEvent(event)
 
     # ================================================================== #
     #  [1] Boundary enforcement                                           #
