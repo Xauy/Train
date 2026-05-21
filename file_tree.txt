@@ -143,7 +143,7 @@ chameleon/
     │                                    #   [Axles] Если row["axles"] непуст — оси берутся
     │                                    #   из него; иначе сохраняется прежний 2-bogie
     │                                    #   fallback от base/length (backwards-compat).
-    ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ + DKP-Log]
+    ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ + DKP-Log + Camera]
     │                                    #   SceneWindow(QMainWindow):
     │                                    #
     │                                    #   ── Module-level helpers ─────────────────
@@ -210,7 +210,34 @@ chameleon/
     │                                    #   _on_step_changed() / _on_sim_finished(),
     │                                    #   Кнопки: Пуск / Пауза (тоггл) / Стоп;
     │                                    #   4 состояния: Idle / Running / Paused / Done;
-    │                                    #   canvas @property — для MP4-экспорта (раздел 5)
+    │                                    #   canvas @property — для MP4-экспорта (раздел 5).
+    │                                    #   [Camera] Управление камерой 3D-сцены:
+    │                                    #     • Переключатель режимов в тулбаре:
+    │                                    #         Орбита     — обычная turntable-камера
+    │                                    #         Сверху     — top-down, elevation=90°
+    │                                    #         Свободная  — vispy FlyCamera (WASD внутри
+    │                                    #                       canvas, мышь захвачена)
+    │                                    #         Следить    — turntable, центр которой
+    │                                    #                       синхронизируется с головным
+    │                                    #                       вагоном каждый тик
+    │                                    #     • Кнопки предустановленных видов:
+    │                                    #         Изометрия / Сверху / Сбоку / Сброс
+    │                                    #     • Глобальные горячие клавиши (canvas в фокусе):
+    │                                    #         W/A/S/D или стрелки — pan
+    │                                    #         Q/E                  — orbit азимут
+    │                                    #         R/F                  — orbit elevation
+    │                                    #         + / − (или Z/X)      — zoom
+    │                                    #         1/2/3/4              — пресеты
+    │                                    #         Space                — сброс
+    │                                    #     • Методы:
+    │                                    #         _apply_camera_mode(mode),
+    │                                    #         _apply_preset_view(preset),
+    │                                    #         _camera_pan / _camera_orbit / _camera_zoom,
+    │                                    #         keyPressEvent override (на уровне окна).
+    │                                    #     • Follow-режим обновляет camera.center в
+    │                                    #         _on_tick (захват lead_center в цикле).
+    │                                    #     • Canvas получил FocusPolicy.StrongFocus,
+    │                                    #         чтобы клавиши доходили до окна.
     │                                    #
     │                                    #   Зависимости: vispy + pyopengl (обязательны);
     │                                    #     trimesh (опционально, улучшает совместимость

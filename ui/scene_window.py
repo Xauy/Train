@@ -50,10 +50,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout,
-    QLabel, QPushButton, QToolBar, QMessageBox, QSizePolicy,
+    QLabel, QPushButton, QToolBar, QMessageBox, QSizePolicy, QComboBox,
 )
 
 try:
@@ -116,6 +116,31 @@ _AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
 _TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
 
 _DKP_FLASH_MS   = 320
+
+# ── Camera controls ─────────────────────────────────────────────────────
+# Available camera modes (also the labels shown in the toolbar dropdown).
+# Internal IDs are English; display labels are Russian.
+_CAM_MODE_TURNTABLE = "turntable"   # default — orbit around center
+_CAM_MODE_TOP       = "top"         # locked top-down (elevation=90°)
+_CAM_MODE_FLY       = "fly"         # vispy FlyCamera (WASD/QE inside the canvas)
+_CAM_MODE_FOLLOW    = "follow"      # turntable whose center tracks the lead wagon
+
+_CAM_MODE_LABELS: tuple[tuple[str, str], ...] = (
+    (_CAM_MODE_TURNTABLE, "Орбита"),
+    (_CAM_MODE_TOP,       "Сверху"),
+    (_CAM_MODE_FLY,       "Свободная"),
+    (_CAM_MODE_FOLLOW,    "Следить"),
+)
+
+# Default turntable angles used by Сброс / first frame.
+_CAM_DEFAULT_FOV       = 40.0
+_CAM_DEFAULT_ELEVATION = 28.0
+_CAM_DEFAULT_AZIMUTH   = -60.0
+
+# Keyboard step sizes (applied per key press in turntable / top modes).
+_CAM_PAN_FRACTION  = 0.07   # fraction of camera distance per pan key press
+_CAM_ORBIT_DEG     = 6.0    # azimuth/elevation degrees per orbit key press
+_CAM_ZOOM_FACTOR   = 1.18   # multiplicative zoom step (>1 = zoom in)
 
 _LOG = logging.getLogger(__name__)
 
@@ -536,13 +561,19 @@ class SceneWindow(QMainWindow):
         self._canvas = SceneCanvas(keys="interactive", bgcolor=_BG, show=False)
         cw = self._canvas.native
         cw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Let the canvas accept keyboard focus when clicked — this is
+        # what lets WASD/arrow-key camera control reach our window-level
+        # keyPressEvent.  Without StrongFocus, Qt's tab-only focus would
+        # leave keystrokes with whichever toolbar widget has the cursor.
+        cw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         root.addWidget(cw)
 
         self._view = self._canvas.central_widget.add_view()
-        self._view.camera = "turntable"
-        self._view.camera.fov       = 40
-        self._view.camera.elevation = 28
-        self._view.camera.azimuth   = -60
+        # Camera mode is mutable — start in turntable. The current mode
+        # string (one of _CAM_MODE_*) drives _on_tick's follow logic and
+        # the keyboard-step dispatcher.
+        self._cam_mode: str = _CAM_MODE_TURNTABLE
+        self._apply_camera_mode(_CAM_MODE_TURNTABLE)
 
         # Runtime-updated scene objects
         self._dkp_visuals:   Dict[str, _DKPVisual] = {}
@@ -624,6 +655,261 @@ class SceneWindow(QMainWindow):
         self._btn_start.clicked.connect(self._cmd_start)
         self._btn_pause.clicked.connect(self._cmd_pause)
         self._btn_stop.clicked.connect(self._cmd_stop)
+
+        # ── Camera controls ─────────────────────────────────────────────
+        tb.addSeparator()
+
+        cam_label = QLabel("Камера:")
+        tb.addWidget(cam_label)
+
+        self._cam_combo = QComboBox()
+        for mode_id, mode_label in _CAM_MODE_LABELS:
+            self._cam_combo.addItem(mode_label, mode_id)
+        self._cam_combo.setCurrentIndex(0)
+        # Lambda passes the user-selected mode_id (stored as itemData).
+        self._cam_combo.currentIndexChanged.connect(
+            lambda idx: self._apply_camera_mode(self._cam_combo.itemData(idx))
+        )
+        tb.addWidget(self._cam_combo)
+
+        # Preset-view buttons.  Each button just applies a fixed pose
+        # to the current camera (or switches to turntable if the user
+        # is in fly mode, where elevation/azimuth aren't meaningful).
+        self._btn_view_iso  = QPushButton("Изометрия")
+        self._btn_view_top  = QPushButton("Сверху")
+        self._btn_view_side = QPushButton("Сбоку")
+        self._btn_view_reset = QPushButton("Сброс")
+        for btn, preset in (
+            (self._btn_view_iso,   "iso"),
+            (self._btn_view_top,   "top"),
+            (self._btn_view_side,  "side"),
+            (self._btn_view_reset, "reset"),
+        ):
+            btn.setFixedHeight(28)
+            btn.setMinimumWidth(78)
+            btn.clicked.connect(lambda _checked=False, p=preset: self._apply_preset_view(p))
+            tb.addWidget(btn)
+
+    # ================================================================== #
+    #  Camera control                                                     #
+    # ================================================================== #
+    #
+    # Modes supported:
+    #   turntable — orbit around a fixed center (VisPy default).
+    #   top       — like turntable but elevation locked to 90° so the
+    #               user can only pan and zoom.  Best for layout views.
+    #   fly       — VisPy FlyCamera; WASD moves the eye through the
+    #               scene.  Mouse capture works inside the canvas.
+    #   follow    — turntable whose center is updated each tick to the
+    #               lead wagon's world position.  Useful for long trains.
+    #
+    # Keyboard works in turntable / top / follow modes.  In fly mode we
+    # leave navigation to VisPy's own handler (the canvas takes focus).
+    #
+    # Keyboard map (when the canvas has the application's attention):
+    #   W / S or ↑ / ↓ — pan forward / back along the camera's azimuth
+    #   A / D or ← / → — pan left / right
+    #   Q / E          — orbit left / right (azimuth)
+    #   R / F          — orbit up / down (elevation)
+    #   + / -  (or Z/X) — zoom in / out
+    #   Space          — reset to default isometric view
+    #   1 / 2 / 3 / 4  — preset views: isometric / top / side / reset
+
+    def _apply_camera_mode(self, mode: str) -> None:
+        """Switch the active camera.  Idempotent; falls back to turntable
+        if the requested mode is unknown.
+        """
+        if mode not in {_CAM_MODE_TURNTABLE, _CAM_MODE_TOP,
+                        _CAM_MODE_FLY, _CAM_MODE_FOLLOW}:
+            mode = _CAM_MODE_TURNTABLE
+
+        self._cam_mode = mode
+
+        if mode == _CAM_MODE_FLY:
+            # FlyCamera ignores fov-style parameters; just hand it the view.
+            try:
+                from vispy.scene.cameras import FlyCamera
+                self._view.camera = FlyCamera()
+            except Exception as exc:
+                _LOG.warning("FlyCamera unavailable (%s); using turntable.", exc)
+                self._view.camera = "turntable"
+                self._cam_mode = _CAM_MODE_TURNTABLE
+        else:
+            self._view.camera = "turntable"
+            cam = self._view.camera
+            cam.fov = _CAM_DEFAULT_FOV
+            if mode == _CAM_MODE_TOP:
+                cam.elevation = 90.0
+                cam.azimuth   = 0.0
+            elif mode in (_CAM_MODE_TURNTABLE, _CAM_MODE_FOLLOW):
+                cam.elevation = _CAM_DEFAULT_ELEVATION
+                cam.azimuth   = _CAM_DEFAULT_AZIMUTH
+
+            # When switching mode mid-run, frame the scene afresh so the
+            # user sees something sensible (instead of an arbitrary
+            # leftover center from the previous camera).
+            try:
+                cam.set_range()
+            except Exception:
+                pass
+
+        # Keep the toolbar combo in sync if the change came from a hotkey
+        # or from a code path other than the combo itself.
+        if hasattr(self, "_cam_combo"):
+            idx = next(
+                (i for i, (mid, _) in enumerate(_CAM_MODE_LABELS) if mid == self._cam_mode),
+                0,
+            )
+            if self._cam_combo.currentIndex() != idx:
+                self._cam_combo.blockSignals(True)
+                self._cam_combo.setCurrentIndex(idx)
+                self._cam_combo.blockSignals(False)
+
+        self._canvas.update()
+
+    def _apply_preset_view(self, preset: str) -> None:
+        """Snap the camera to one of the named poses.
+
+        Presets imply turntable-style camera, so if we're in fly mode
+        we drop back to turntable first.  In follow mode we keep the
+        center-tracking behaviour but reset angles.
+        """
+        if self._cam_mode == _CAM_MODE_FLY:
+            self._apply_camera_mode(_CAM_MODE_TURNTABLE)
+
+        cam = self._view.camera
+        if preset == "iso":
+            cam.elevation = _CAM_DEFAULT_ELEVATION
+            cam.azimuth   = _CAM_DEFAULT_AZIMUTH
+        elif preset == "top":
+            cam.elevation = 90.0
+            cam.azimuth   = 0.0
+        elif preset == "side":
+            cam.elevation = 0.0
+            cam.azimuth   = -90.0
+        elif preset == "reset":
+            cam.fov       = _CAM_DEFAULT_FOV
+            cam.elevation = _CAM_DEFAULT_ELEVATION
+            cam.azimuth   = _CAM_DEFAULT_AZIMUTH
+            try:
+                cam.set_range()
+            except Exception:
+                pass
+        self._canvas.update()
+
+    def _camera_pan(self, dx_frac: float, dy_frac: float) -> None:
+        """Pan the camera center on the ground plane.
+
+        *dx_frac* / *dy_frac* are fractions of the camera's current
+        distance, so a single key press feels equally responsive at any
+        zoom level.  The pan is performed in the *camera's* X/Y, which
+        for turntable is the world X/Y rotated by the azimuth.
+        """
+        cam = self._view.camera
+        if not hasattr(cam, "center"):
+            return
+
+        # Distance to scene: TurntableCamera stores it as .distance.
+        # Some camera variants name it differently — fall back to 1.0.
+        dist = float(getattr(cam, "distance", 1.0) or 1.0)
+        step = dist * _CAM_PAN_FRACTION
+
+        # Build an azimuth-aware basis so "forward" tracks where the
+        # user is looking, not world +Y.
+        az = math.radians(float(getattr(cam, "azimuth", 0.0)))
+        # +Y in screen → forward into the scene; +X in screen → right.
+        fx, fy = -math.sin(az), math.cos(az)    # forward unit (ground)
+        rx, ry =  math.cos(az), math.sin(az)    # right unit   (ground)
+
+        cx, cy, cz = cam.center
+        cam.center = (
+            cx + rx * step * dx_frac + fx * step * dy_frac,
+            cy + ry * step * dx_frac + fy * step * dy_frac,
+            cz,
+        )
+        self._canvas.update()
+
+    def _camera_orbit(self, d_az: float, d_el: float) -> None:
+        """Add deltas to azimuth and elevation, clamping elevation."""
+        cam = self._view.camera
+        if hasattr(cam, "azimuth"):
+            cam.azimuth = float(cam.azimuth) + d_az
+        if hasattr(cam, "elevation"):
+            new_el = float(cam.elevation) + d_el
+            # Clamp slightly inside ±90° to avoid the gimbal flip.
+            cam.elevation = max(-89.0, min(89.0, new_el))
+        self._canvas.update()
+
+    def _camera_zoom(self, factor: float) -> None:
+        """Multiplicative zoom — factor>1 zooms in, factor<1 zooms out.
+
+        Works by scaling .distance on turntable; FlyCamera ignores this
+        (it has its own movement model).
+        """
+        cam = self._view.camera
+        if hasattr(cam, "distance") and cam.distance is not None:
+            try:
+                cam.distance = float(cam.distance) / factor
+            except (TypeError, ValueError):
+                pass
+        elif hasattr(cam, "scale_factor"):
+            try:
+                cam.scale_factor = float(cam.scale_factor) / factor
+            except (TypeError, ValueError):
+                pass
+        self._canvas.update()
+
+    def keyPressEvent(self, event) -> None:
+        """Window-level hotkeys for camera control.
+
+        We only consume keys that map to camera actions; everything else
+        is forwarded to Qt so existing shortcuts (Escape on dialogs, etc.)
+        still work.  Fly mode skips this handler entirely so the canvas
+        can run its own navigation.
+        """
+        if self._cam_mode == _CAM_MODE_FLY:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        # WASD / arrows → pan.  dx_frac is +right, dy_frac is +forward.
+        if key in (Qt.Key.Key_W, Qt.Key.Key_Up):
+            self._camera_pan(0.0, +1.0)
+        elif key in (Qt.Key.Key_S, Qt.Key.Key_Down):
+            self._camera_pan(0.0, -1.0)
+        elif key in (Qt.Key.Key_A, Qt.Key.Key_Left):
+            self._camera_pan(-1.0, 0.0)
+        elif key in (Qt.Key.Key_D, Qt.Key.Key_Right):
+            self._camera_pan(+1.0, 0.0)
+        # Q/E → orbit azimuth; R/F → orbit elevation
+        elif key == Qt.Key.Key_Q:
+            self._camera_orbit(-_CAM_ORBIT_DEG, 0.0)
+        elif key == Qt.Key.Key_E:
+            self._camera_orbit(+_CAM_ORBIT_DEG, 0.0)
+        elif key == Qt.Key.Key_R:
+            self._camera_orbit(0.0, +_CAM_ORBIT_DEG)
+        elif key == Qt.Key.Key_F:
+            self._camera_orbit(0.0, -_CAM_ORBIT_DEG)
+        # Zoom: + / =, - / _, Z, X
+        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Z):
+            self._camera_zoom(_CAM_ZOOM_FACTOR)
+        elif key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore, Qt.Key.Key_X):
+            self._camera_zoom(1.0 / _CAM_ZOOM_FACTOR)
+        elif key == Qt.Key.Key_Space:
+            self._apply_preset_view("reset")
+        elif key == Qt.Key.Key_1:
+            self._apply_preset_view("iso")
+        elif key == Qt.Key.Key_2:
+            self._apply_preset_view("top")
+        elif key == Qt.Key.Key_3:
+            self._apply_preset_view("side")
+        elif key == Qt.Key.Key_4:
+            self._apply_preset_view("reset")
+        else:
+            super().keyPressEvent(event)
+            return
+
+        event.accept()
 
     # ================================================================== #
     #  Scene initialisation                                               #
@@ -851,6 +1137,10 @@ class SceneWindow(QMainWindow):
         if self._check_boundary(state, geom):
             return   # engine already paused; skip position update
 
+        # Captured during the loop so follow-mode can re-center the
+        # camera on the lead wagon without recomputing geometry.
+        lead_center: Optional[np.ndarray] = None
+
         for wi, wagon in enumerate(self._wagons):
             s_front = state.s_head_mm - self._wagon_front_offsets[wi]
             s_rear  = s_front - wagon.length_mm
@@ -865,6 +1155,9 @@ class SceneWindow(QMainWindow):
             pf     = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
             pr     = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
             center = (pf + pr) * 0.5
+
+            if wi == 0:
+                lead_center = center
 
             t = vispy.scene.transforms.MatrixTransform()
             t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
@@ -887,6 +1180,17 @@ class SceneWindow(QMainWindow):
         if self._coupler_line is not None:
             self._coupler_line.set_data(
                 pos=self._coupler_points(state.s_head_mm, geom),
+            )
+
+        # Follow-mode camera tracking — slide the orbit centre to the
+        # lead wagon, keeping the user's azimuth/elevation/zoom intact.
+        if (self._cam_mode == _CAM_MODE_FOLLOW
+                and lead_center is not None
+                and hasattr(self._view.camera, "center")):
+            self._view.camera.center = (
+                float(lead_center[0]),
+                float(lead_center[1]),
+                float(lead_center[2]),
             )
 
         v_mms = abs(state.v_mms)
