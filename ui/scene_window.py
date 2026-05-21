@@ -634,6 +634,14 @@ class SceneWindow(QMainWindow):
             "QPushButton:disabled { color:#3a3f4a; border-color:#1e2228; }"
             "QLabel { color:#6878a0; font-family:'Courier New',monospace;"
             "  font-size:12px; padding:0 8px; }"
+            "QComboBox { background:#1a1f28; color:#c8d4e8;"
+            "  border:1px solid #353d4d; border-radius:4px;"
+            "  padding:2px 6px; font-size:12px; min-width:52px; }"
+            "QComboBox:hover { border-color:#5070a0; }"
+            "QComboBox:disabled { color:#3a3f4a; border-color:#1e2228; }"
+            "QComboBox::drop-down { border:none; width:18px; }"
+            "QComboBox QAbstractItemView { background:#1a1f28; color:#c8d4e8;"
+            "  selection-background-color:#2a3a5e; border:1px solid #353d4d; }"
         )
 
         self._btn_start = QPushButton("▶  Пуск")
@@ -643,6 +651,43 @@ class SceneWindow(QMainWindow):
             btn.setFixedHeight(28)
             btn.setMinimumWidth(100)
             tb.addWidget(btn)
+
+        tb.addSeparator()
+
+        # ── Speed multiplier ────────────────────────────────────────────
+        tb.addWidget(QLabel("Скорость:"))
+        self._speed_mult_combo = QComboBox()
+        for lbl, val in [
+            ("×0.25", 0.25), ("×0.5", 0.5), ("×1", 1.0),
+            ("×2", 2.0), ("×3", 3.0), ("×5", 5.0), ("×10", 10.0),
+        ]:
+            self._speed_mult_combo.addItem(lbl, val)
+        self._speed_mult_combo.setCurrentIndex(2)   # ×1 default
+        self._speed_mult_combo.setFixedHeight(28)
+        self._speed_mult_combo.currentIndexChanged.connect(
+            lambda idx: self._cmd_set_speed(self._speed_mult_combo.itemData(idx))
+        )
+        tb.addWidget(self._speed_mult_combo)
+
+        tb.addSeparator()
+
+        # ── Fast-forward ────────────────────────────────────────────────
+        tb.addWidget(QLabel("Перемотка:"))
+        self._ff_amount_combo = QComboBox()
+        for lbl, secs in [("5 с", 5), ("10 с", 10), ("30 с", 30),
+                           ("60 с", 60), ("5 мин", 300)]:
+            self._ff_amount_combo.addItem(lbl, secs)
+        self._ff_amount_combo.setCurrentIndex(1)   # 10 s default
+        self._ff_amount_combo.setFixedHeight(28)
+        tb.addWidget(self._ff_amount_combo)
+
+        self._btn_ff = QPushButton("⏩")
+        self._btn_ff.setFixedHeight(28)
+        self._btn_ff.setMinimumWidth(44)
+        self._btn_ff.clicked.connect(
+            lambda: self._cmd_fast_forward(self._ff_amount_combo.currentData())
+        )
+        tb.addWidget(self._btn_ff)
 
         tb.addSeparator()
 
@@ -1353,6 +1398,12 @@ class SceneWindow(QMainWindow):
         self._canvas.update()
         self._set_state_idle()
 
+    def _cmd_set_speed(self, multiplier: float) -> None:
+        self._engine.set_speed_multiplier(multiplier)
+
+    def _cmd_fast_forward(self, seconds: int) -> None:
+        self._engine.fast_forward(float(seconds))
+
     # ================================================================== #
     #  Button state machine                                               #
     # ================================================================== #
@@ -1362,18 +1413,27 @@ class SceneWindow(QMainWindow):
         self._btn_pause.setEnabled(False)
         self._btn_pause.setText("⏸  Пауза")
         self._btn_stop.setEnabled(False)
+        self._speed_mult_combo.setEnabled(False)
+        self._ff_amount_combo.setEnabled(False)
+        self._btn_ff.setEnabled(False)
 
     def _set_state_running(self) -> None:
         self._btn_start.setEnabled(False)
         self._btn_pause.setEnabled(True)
         self._btn_pause.setText("⏸  Пауза")
         self._btn_stop.setEnabled(True)
+        self._speed_mult_combo.setEnabled(True)
+        self._ff_amount_combo.setEnabled(True)
+        self._btn_ff.setEnabled(True)
 
     def _set_state_paused(self) -> None:
         self._btn_start.setEnabled(False)
         self._btn_pause.setEnabled(True)
         self._btn_pause.setText("▶  Продолжить")
         self._btn_stop.setEnabled(True)
+        self._speed_mult_combo.setEnabled(True)
+        self._ff_amount_combo.setEnabled(True)
+        self._btn_ff.setEnabled(True)
 
     # ================================================================== #
     #  Canvas access  (for output_writer.py §5.3)                        #

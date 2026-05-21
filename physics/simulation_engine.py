@@ -31,6 +31,7 @@ Kinematics convention (updated):
 
 from __future__ import annotations
 
+import time
 from typing import List, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -132,6 +133,17 @@ class SimulationEngine(QObject):
         self._running: bool = False
         self._paused:  bool = False
 
+        # Playback speed (1.0 = real-time; 2.0 = double speed, etc.)
+        self._speed_multiplier: float = 1.0
+        # Suppresses tick_updated during multi-tick batches and fast-forward.
+        self._ff_mode: bool = False
+
+        # Wall-clock reference used by _tick to compute how many physics
+        # iterations are due each timer fire.  Reset on start() and resume()
+        # so pause time never counts as owed simulation time.
+        self._wall_start:  float = 0.0   # time.perf_counter() snapshot
+        self._ticks_done:  int   = 0     # physics iterations processed so far
+
     # ------------------------------------------------------------------ #
     #  Public API (plan 2.4)                                               #
     # ------------------------------------------------------------------ #
@@ -154,6 +166,8 @@ class SimulationEngine(QObject):
         self._reset_state()
         self._running = True
         self._paused  = False
+        self._wall_start = time.perf_counter()
+        self._ticks_done = 0
         self._timer.start()
 
     def pause(self) -> None:
@@ -166,6 +180,10 @@ class SimulationEngine(QObject):
         """Continue ticking after a pause."""
         if self._running and self._paused:
             self._paused = False
+            # Reset the wall-clock reference so the time spent paused is not
+            # counted as owed simulation time on the next timer fire.
+            self._wall_start = time.perf_counter()
+            self._ticks_done = 0
             self._timer.start()
 
     def stop(self) -> None:
@@ -182,6 +200,57 @@ class SimulationEngine(QObject):
     def get_event_log(self) -> List[DKPEvent]:
         """Return all DKP events recorded since the last start()."""
         return list(self._event_log)
+
+    def set_speed_multiplier(self, multiplier: float) -> None:
+        """Adjust playback speed relative to real-time.
+
+        1.0 = real-time, 2.0 = twice as fast, 0.5 = half speed.
+        The timer interval never changes; speed is achieved by processing
+        more (or fewer) physics ticks per timer fire in _tick().
+        """
+        self._speed_multiplier = max(0.1, float(multiplier))
+        # Reset wall-clock reference so the new rate takes effect immediately
+        # without a burst of catch-up ticks.
+        if self._running:
+            self._wall_start = time.perf_counter()
+            self._ticks_done = 0
+
+    def fast_forward(self, seconds: float) -> None:
+        """Skip *seconds* of simulated time in a tight synchronous loop.
+
+        Visual updates (tick_updated) are suppressed during the loop and a
+        single update is emitted at the end.  DKP events and step transitions
+        fire normally so the event log stays complete.
+
+        Safe to call when paused: the timer stays stopped after the jump and
+        the simulation remains paused at the new position.
+        """
+        if not self._running:
+            return
+
+        n_ticks = max(1, int(seconds * 1000.0 / self._config.dt_ms))
+        was_active = self._timer.isActive()
+        self._timer.stop()
+
+        self._ff_mode = True
+        try:
+            for _ in range(n_ticks):
+                self._tick_one()
+                if not self._running:
+                    break
+        finally:
+            self._ff_mode = False
+
+        # Reset wall-clock reference so the timer doesn't try to catch up
+        # the skipped real time on the very next fire.
+        if self._running:
+            self._wall_start = time.perf_counter()
+            self._ticks_done = 0
+
+        if self._running and was_active:
+            self._timer.start()
+
+        self.tick_updated.emit(self._build_state())
 
     # ------------------------------------------------------------------ #
     #  Validation (plan 2.6)                                               #
@@ -285,9 +354,41 @@ class SimulationEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def _tick(self) -> None:
+        """Timer callback.  Computes how many physics iterations are owed
+        since the last fire (based on wall-clock time and speed multiplier)
+        and calls _tick_one() that many times.
+
+        Using wall-clock time rather than relying on the timer interval
+        compensates for OS timer jitter (Windows minimum ~15 ms) and makes
+        the speed multiplier work correctly at all values without requiring
+        a sub-millisecond timer interval.
+        """
+        wall_now = time.perf_counter()
+        elapsed_ms = (wall_now - self._wall_start) * 1000.0
+        ticks_due = int(elapsed_ms * self._speed_multiplier / self._config.dt_ms)
+
+        n = ticks_due - self._ticks_done
+        if n <= 0:
+            return  # timer fired early; nothing to do yet
+
+        # Cap per-fire work to keep the UI responsive under very high
+        # multipliers or after a slow tick.  100 ticks at even dt_ms=10ms
+        # is only 1 s of simulation, well within a frame budget.
+        n = min(n, 100)
+
+        for i in range(n):
+            self._ff_mode = (i < n - 1)   # suppress visuals for all but last
+            self._tick_one()
+            self._ticks_done += 1
+            if not self._running:
+                break
+
+        self._ff_mode = False
+
+    def _tick_one(self) -> None:
         """Advance the simulation by one dt_ms step.
 
-        Executed in the Qt main-thread event loop on every timer timeout.
+        Called by _tick() (timer dispatch) and fast_forward().
         Implements the algorithm described in plan section 2.5 (steps А–Ж).
         """
         cfg = self._config
@@ -458,7 +559,9 @@ class SimulationEngine(QObject):
                 # All steps exhausted — simulation complete.
                 self._timer.stop()
                 self._running = False
-                # Emit the final state snapshot before finishing.
+                # Always emit the final state snapshot — even inside a
+                # batched tick where _ff_mode is True — so the scene shows
+                # the correct end position when the scenario completes.
                 self.tick_updated.emit(self._build_state())
                 self.sim_finished.emit()
                 return
@@ -472,7 +575,8 @@ class SimulationEngine(QObject):
             # acceleration, not speed".
 
         # ── Step Ж: emit state snapshot ────────────────────────────────
-        self.tick_updated.emit(self._build_state())
+        if not self._ff_mode:
+            self.tick_updated.emit(self._build_state())
 
     # ------------------------------------------------------------------ #
     #  Internal — snapshot builder                                         #

@@ -72,15 +72,44 @@ chameleon/
 │   │                                    #   API: open() / close() / log_event(DKPEvent),
 │   │                                    #   а также context-manager (__enter__/__exit__).
 │   │                                    #   Без Qt; используется SceneWindow.
-│   └── simulation_engine.py             # [DONE 2.4–2.6, UPDATED DKP-Point, UPDATED Momentum]
+│   └── simulation_engine.py             # [DONE 2.4–2.6, UPDATED DKP-Point, UPDATED Momentum,
+│                                        #  UPDATED Speed/FF]
 │                                        #   SimulationEngine(QObject):
 │                                        #   Signals: tick_updated, dkp_triggered,
 │                                        #            step_changed, sim_finished
 │                                        #   API: start(), pause(), resume(), stop(),
-│                                        #        get_state(), get_event_log()
-│                                        #   Internal: _tick() — kinematics (Б),
-│                                        #     axis update (В–Г), DKP crossing (Д),
-│                                        #     step advance (Е), state emit (Ж)
+│                                        #        get_state(), get_event_log(),
+│                                        #        set_speed_multiplier(multiplier),
+│                                        #        fast_forward(seconds)
+│                                        #   Internal: _tick() — wall-clock dispatcher;
+│                                        #     вычисляет кол-во физических итераций,
+│                                        #     должных к исполнению за прошедшее реальное
+│                                        #     время × speed_multiplier; вызывает
+│                                        #     _tick_one() нужное кол-во раз, подавляя
+│                                        #     tick_updated для всех итераций кроме
+│                                        #     последней (_ff_mode).
+│                                        #   _tick_one() — одна физическая итерация dt_ms:
+│                                        #     кинематика (Б), обновление осей (В–Г),
+│                                        #     пересечение ДКП (Д), переключение шагов (Е),
+│                                        #     emit состояния (Ж).
+│                                        #   [Speed/FF] Управление скоростью воспроизведения:
+│                                        #     • set_speed_multiplier(x) — обновляет
+│                                        #       _speed_multiplier (0.1…∞); интервал таймера
+│                                        #       НЕ меняется — скорость регулируется числом
+│                                        #       тиков за один fire (_tick dispatcher);
+│                                        #       сбрасывает wall-clock reference.
+│                                        #     • fast_forward(seconds) — синхронный цикл
+│                                        #       _tick_one() на seconds*1000/dt_ms итераций;
+│                                        #       tick_updated подавлен на всё время,
+│                                        #       один emit в конце; DKP-события и смены
+│                                        #       шагов сохраняются; работает в паузе.
+│                                        #     • Точность времени: time.perf_counter()
+│                                        #       вместо интервала QTimer — компенсирует
+│                                        #       джиттер ОС (~15 мс на Windows) и
+│                                        #       устраняет дрейф базовой скорости 1×.
+│                                        #     • _wall_start / _ticks_done сбрасываются
+│                                        #       в start(), resume(), set_speed_multiplier()
+│                                        #       и после fast_forward().
 │                                        #   validate() — pre-start integrity checks.
 │                                        #   [DKP-Point] Логика срабатывания ДКП:
 │                                        #     • точечный триггер: пересечение оси точки
@@ -143,7 +172,8 @@ chameleon/
     │                                    #   [Axles] Если row["axles"] непуст — оси берутся
     │                                    #   из него; иначе сохраняется прежний 2-bogie
     │                                    #   fallback от base/length (backwards-compat).
-    ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ + DKP-Log + Camera]
+    ├── scene_window.py                  # [UPDATED 3.1–3.5 + Couplers + OBJ + DKP-Log + Camera
+    │                                    #  + Speed/FF]
     │                                    #   SceneWindow(QMainWindow):
     │                                    #
     │                                    #   ── Module-level helpers ─────────────────
@@ -211,6 +241,13 @@ chameleon/
     │                                    #   Кнопки: Пуск / Пауза (тоггл) / Стоп;
     │                                    #   4 состояния: Idle / Running / Paused / Done;
     │                                    #   canvas @property — для MP4-экспорта (раздел 5).
+    │                                    #   [Speed/FF] Управление скоростью в тулбаре:
+    │                                    #     • Скорость: QComboBox ×0.25…×10 →
+    │                                    #         engine.set_speed_multiplier()
+    │                                    #     • Перемотка: QComboBox (5с/10с/30с/60с/5мин)
+    │                                    #         + кнопка ⏩ → engine.fast_forward()
+    │                                    #     • Оба контрола активны при Running/Paused,
+    │                                    #         отключены при Idle.
     │                                    #   [Camera] Управление камерой 3D-сцены:
     │                                    #     • Переключатель режимов в тулбаре:
     │                                    #         Орбита     — обычная turntable-камера
