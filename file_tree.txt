@@ -88,9 +88,14 @@ chameleon/
 │                                        #       [s_prev, s_curr) для LeftToRight,
 │                                        #       соответственно для RightToLeft);
 │                                        #     • self._dkp_fired:
-│                                        #       set[(sensor_id, wagon_idx, axle_idx)]
+│                                        #       set[(sensor_id, wagon_idx, axle_idx,
+│                                        #            direction)]
 │                                        #       обеспечивает срабатывание один раз
-│                                        #       на запуск; сбрасывается в _reset_state();
+│                                        #       на пару (ось, направление) за запуск.
+│                                        #       Сенсор с фильтром 'Both' даёт до двух
+│                                        #       событий на ось — по одному на каждое
+│                                        #       направление пересечения.  Сбрасывается
+│                                        #       в _reset_state();
 │                                        #     • фильтр direction = 'Both' / 'LeftToRight'
 │                                        #       / 'RightToLeft' (без 'Any').
 │                                        #   [Momentum] Кинематика без телепорта скорости:

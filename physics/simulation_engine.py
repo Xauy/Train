@@ -115,10 +115,13 @@ class SimulationEngine(QObject):
         # Append-only event log for the current run.
         self._event_log: List[DKPEvent] = []
 
-        # Tracks which (sensor_id, wagon_index, axle_index) triples have
-        # already fired in the current run.  Used to enforce the
-        # "once per axle per sensor" rule (plan: point trigger).
-        self._dkp_fired: set[tuple[str, int, int]] = set()
+        # Tracks which (sensor_id, wagon_index, axle_index, direction)
+        # quadruples have already fired in the current run.  Used to
+        # enforce the "once per direction per axle per sensor" rule
+        # (plan: point trigger).  Including the direction in the key
+        # lets a 'Both'-filter sensor produce two events for an axle
+        # that passes the point in one direction and then reverses.
+        self._dkp_fired: set[tuple[str, int, int, str]] = set()
 
         # Qt timer — interval set from config; connected to _tick.
         self._timer = QTimer(self)
@@ -376,19 +379,22 @@ class SimulationEngine(QObject):
         # ── Step Д: check DKP triggers ─────────────────────────────────
         #
         # Each sensor is a point trigger at s = dkp.s_mm.  An axle fires
-        # the sensor at most once per simulation run, on the tick when
-        # its position crosses that point.  We detect a crossing by
-        # checking whether s = dkp.s_mm lies in the half-open interval
-        # spanned by the axle's previous and current positions:
+        # the sensor at most once per crossing direction per simulation
+        # run, on the tick when its position crosses that point.  A
+        # crossing is detected by checking whether s = dkp.s_mm lies in
+        # the half-open interval spanned by the axle's previous and
+        # current positions:
         #
         #   LeftToRight (s increasing):   s_prev <= s_mm < s_curr
         #   RightToLeft (s decreasing):   s_curr < s_mm <= s_prev
         #
         # A stationary axle (s_prev == s_curr) cannot cross anything and
-        # is skipped automatically.  Each (sensor, wagon, axle) triple is
-        # remembered in self._dkp_fired so subsequent passes — including
-        # an axle that crosses, comes back, and crosses again — do not
-        # re-trigger.  The fired set is cleared by _reset_state().
+        # is skipped automatically.  Each (sensor, wagon, axle, dir)
+        # quadruple is remembered in self._dkp_fired so a repeated pass
+        # in the SAME direction does not re-trigger.  A pass in the
+        # OPPOSITE direction is a distinct event and will fire — which
+        # is what 'Both' means: trigger on each direction, once per
+        # direction.  The fired set is cleared by _reset_state().
         for dkp in cfg.dkps:
             if not dkp.enabled:
                 continue
@@ -398,10 +404,6 @@ class SimulationEngine(QObject):
 
             for wi, wagon in enumerate(self._wagons):
                 for aj, axle in enumerate(wagon.axles):
-                    key = (dkp.sensor_id, wi, aj)
-                    if key in self._dkp_fired:
-                        continue
-
                     s_prev = self._s_prev[wi][aj]
                     s_curr = new_s[wi][aj]
 
@@ -415,6 +417,14 @@ class SimulationEngine(QObject):
 
                     # Apply direction filter.
                     if not no_filter and dkp.direction_filter != crossing_dir:
+                        continue
+
+                    # Suppress repeated passes in the SAME direction.
+                    # Note the direction component in the key — this is
+                    # what lets a 'Both' sensor fire twice (once per
+                    # direction) when a wagon passes and then reverses.
+                    key = (dkp.sensor_id, wi, aj, crossing_dir)
+                    if key in self._dkp_fired:
                         continue
 
                     event = DKPEvent(
