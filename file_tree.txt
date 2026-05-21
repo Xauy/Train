@@ -72,7 +72,7 @@ chameleon/
 │   │                                    #   API: open() / close() / log_event(DKPEvent),
 │   │                                    #   а также context-manager (__enter__/__exit__).
 │   │                                    #   Без Qt; используется SceneWindow.
-│   └── simulation_engine.py             # [DONE 2.4–2.6, UPDATED DKP-Point]
+│   └── simulation_engine.py             # [DONE 2.4–2.6, UPDATED DKP-Point, UPDATED Momentum]
 │                                        #   SimulationEngine(QObject):
 │                                        #   Signals: tick_updated, dkp_triggered,
 │                                        #            step_changed, sim_finished
@@ -93,6 +93,24 @@ chameleon/
 │                                        #       на запуск; сбрасывается в _reset_state();
 │                                        #     • фильтр direction = 'Both' / 'LeftToRight'
 │                                        #       / 'RightToLeft' (без 'Any').
+│                                        #   [Momentum] Кинематика без телепорта скорости:
+│                                        #     • behavior задаёт ЗНАК ускорения, не знак
+│                                        #       скорости.  Train с v=+250 в шаге
+│                                        #       RightToLeft плавно тормозит через 0
+│                                        #       и разгоняется в обратную сторону.
+│                                        #     • Stop → ускорение −sign(v) до v=0, затем
+│                                        #       удержание (без overshoot).
+│                                        #     • v_threshold ограничивает скорость только
+│                                        #       когда v направлено в сторону ускорения
+│                                        #       (не клипает торможение против движения).
+│                                        #     • На границе шагов скорость переносится
+│                                        #       как есть; v0_mms используется только при
+│                                        #       старте симуляции (_reset_state).
+│                                        #     • self._direction обновляется по знаку
+│                                        #       реальной скорости каждый тик
+│                                        #       (HUD показывает фактическое движение).
+│                                        #     • Хелпер _clamp_speed удалён — клиппинг
+│                                        #       теперь inline и физически корректный.
 │
 ├── validation/
 │   ├── __init__.py

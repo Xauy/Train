@@ -14,10 +14,19 @@ Design constraints (from section 2.1):
 
 Coordinate convention (from ТЗ v0.2):
   • s_mm increases from the start point of the path toward the end point.
-  • LeftToRight → s increases each tick (positive velocity).
-  • RightToLeft → s decreases each tick (negative velocity).
+  • Positive velocity → train moves toward higher s (LeftToRight).
+  • Negative velocity → train moves toward lower s  (RightToLeft).
   • The "head" of the train is its leading axle, i.e. wagon 0 / axle 0.
     All other axes are offset *behind* the head by a cumulative distance.
+
+Kinematics convention (updated):
+  Velocity is a continuous quantity.  A scenario step's *behavior* field
+  sets only the SIGN of the applied acceleration, never the velocity
+  itself.  Velocity carries over between steps; v0_mms is consulted only
+  to seed the very first step at simulation start (_reset_state).
+  A train rolling in one direction that enters a step pointing the other
+  way will smoothly decelerate through zero and accelerate the opposite
+  way — never instantly snap.  See _tick() Step Б for the full rules.
 """
 
 from __future__ import annotations
@@ -293,15 +302,58 @@ class SimulationEngine(QObject):
         dt_s: float = cfg.dt_ms / 1000.0
 
         # ── Step Б: apply kinematics ───────────────────────────────────
+        # Velocity is treated as a continuous quantity that carries
+        # across ticks (and across step transitions — see Step Е).
+        # *behavior* sets the SIGN of the applied acceleration, not the
+        # sign of velocity:
+        #
+        #   LeftToRight → accel_sign = +1   (push toward +s)
+        #   RightToLeft → accel_sign = -1   (push toward -s)
+        #   Stop        → accel_sign = -sign(v)  (oppose current motion)
+        #
+        # This means a train rolling right-to-left that enters a
+        # LeftToRight step does NOT teleport its velocity to zero; it
+        # smoothly decelerates, stops, and then accelerates leftward,
+        # all under a single constant acceleration.  v_threshold caps
+        # the speed only in the direction we're being pushed, so a
+        # train decelerating against its current direction is never
+        # artificially clipped.
         if current_step.behavior == "Stop":
-            self._v_mms = 0.0
+            # Decelerate toward zero by applying accel opposite to v.
+            # Once v reaches zero, hold there (accel_sign becomes 0).
+            if self._v_mms > 0:
+                accel_sign = -1.0
+            elif self._v_mms < 0:
+                accel_sign = +1.0
+            else:
+                accel_sign = 0.0
+            v_new = self._v_mms + accel_sign * current_step.accel_mms2 * dt_s
+            # Detect zero-crossing: if the velocity flipped sign, the
+            # train has stopped; pin it at zero instead of overshooting
+            # into the opposite direction.
+            if accel_sign != 0.0 and v_new * self._v_mms < 0:
+                v_new = 0.0
         else:
-            sign = 1.0 if current_step.behavior == "LeftToRight" else -1.0
-            v_new = self._v_mms + sign * current_step.accel_mms2 * dt_s
-            if current_step.v_threshold_mms > 0:
-                # Cap the absolute speed without changing the direction sign.
-                v_new = _clamp_speed(v_new, sign, current_step.v_threshold_mms)
-            self._v_mms = v_new
+            accel_sign = +1.0 if current_step.behavior == "LeftToRight" else -1.0
+            v_new = self._v_mms + accel_sign * current_step.accel_mms2 * dt_s
+            # Cap |v| at v_threshold ONLY when v is in the direction
+            # we're being pushed — a train still moving against accel
+            # is decelerating and must not be clipped.
+            if (current_step.v_threshold_mms > 0
+                    and v_new * accel_sign > 0
+                    and abs(v_new) > current_step.v_threshold_mms):
+                v_new = accel_sign * current_step.v_threshold_mms
+
+        self._v_mms = v_new
+
+        # Reflect the actual direction of motion in the high-level
+        # _direction field so the HUD shows reality, not intent.
+        if self._v_mms > 0:
+            self._direction = "LeftToRight"
+        elif self._v_mms < 0:
+            self._direction = "RightToLeft"
+        # else: keep previous _direction so a stopped train still
+        # remembers which way it last rolled (useful for the HUD label).
 
         # ── Step В: advance the head coordinate ────────────────────────
         s_head_new = self._s_head_mm + self._v_mms * dt_s
@@ -401,9 +453,13 @@ class SimulationEngine(QObject):
                 self.sim_finished.emit()
                 return
 
-            # Seed velocity from the new step's v0.
-            next_step = cfg.steps[self._step_index]
-            self._v_mms = next_step.v0_mms
+            # Carry momentum across the step boundary — velocity is
+            # whatever physics has produced by the end of the previous
+            # step.  We do NOT reset to next_step.v0_mms here; that
+            # field is only used once, at simulation start (see
+            # _reset_state).  Teleporting velocity at every transition
+            # would defeat the whole point of "direction changes
+            # acceleration, not speed".
 
         # ── Step Ж: emit state snapshot ────────────────────────────────
         self.tick_updated.emit(self._build_state())
@@ -448,24 +504,4 @@ class SimulationEngine(QObject):
 #  Module-level helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def _clamp_speed(v: float, sign: float, threshold: float) -> float:
-    """Clamp |v| to threshold while preserving the direction sign.
-
-    If the computed velocity has already overshot in the wrong direction
-    (e.g., deceleration past zero), pin it at zero instead.
-
-    Args:
-        v:         Unclamped velocity (mm/s), signed.
-        sign:      Expected direction sign (+1 or -1).
-        threshold: Speed cap, always positive (mm/s).
-
-    Returns:
-        Clamped velocity with the correct sign.
-    """
-    # Clamp the absolute speed.
-    clamped = min(abs(v), threshold)
-    # Re-apply direction.  If v has already flipped sign (overshot), use 0.
-    if v * sign < 0:
-        return 0.0
-    return clamped * sign
+# (No module-level helpers currently — velocity clamping is inline in _tick.)
