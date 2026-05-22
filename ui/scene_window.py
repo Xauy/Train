@@ -386,6 +386,7 @@ class _PathGeom:
         self.unit_vec  = (delta / self.length) if self.length > 0.0 else np.array([1., 0., 0.])
         self.perp_vec  = np.array([-self.unit_vec[1], self.unit_vec[0], 0.0])
         self.up_vec    = np.array([0.0, 0.0, 1.0])
+        self.rotation_deg = math.degrees(math.atan2(self.unit_vec[1], self.unit_vec[0]))
 
     def s_to_xyz(self, s_mm: float) -> np.ndarray:
         return self.p1 + self.unit_vec * s_mm
@@ -584,11 +585,19 @@ class SceneWindow(QMainWindow):
         self._dkp_visuals:   Dict[str, _DKPVisual] = {}
         # Each entry is either a visuals.Box (fallback) or a visuals.Mesh (OBJ).
         self._wagon_visuals: List[object]            = []
+        # Cached MatrixTransform per wagon — reset+reuse each tick instead of
+        # allocating a new object per wagon per tick.
+        self._wagon_transforms: List                 = []
         # Per-wagon vertical offset added to z_rail to position the visual:
         #   Box → wagon_h/2 (centre to base);  Mesh → 0 (base already at z=0).
         self._wagon_z_offsets: List[float]           = []
         self._axle_visuals:  List[visuals.Markers]   = []
         self._coupler_line:  Optional[visuals.Line]  = None   # [4]
+        # Precomputed numpy arrays for vectorised per-tick computation.
+        self._wagon_front_offsets_np: np.ndarray = np.empty(0, dtype=np.float64)
+        self._wagon_lengths_np:       np.ndarray = np.empty(0, dtype=np.float64)
+        self._wagon_heights_np:       np.ndarray = np.empty(0, dtype=np.float64)
+        self._wagon_z_offsets_np:     np.ndarray = np.empty(0, dtype=np.float64)
 
         # Build static scene
         self._init_ground_grid()
@@ -1057,6 +1066,14 @@ class SceneWindow(QMainWindow):
         if geom is None:
             return
 
+        # Build numpy arrays from the wagon list once so _on_tick can vectorise.
+        self._wagon_front_offsets_np = np.array(self._wagon_front_offsets, dtype=np.float64)
+        self._wagon_lengths_np = np.array([w.length_mm for w in self._wagons], dtype=np.float64)
+        self._wagon_heights_np = np.array(
+            [w.height_mm if w.height_mm > 0 else w.length_mm * 0.13 for w in self._wagons],
+            dtype=np.float64,
+        )
+
         for wi, wagon in enumerate(self._wagons):
             s_front = self._config.train.s0_mm - self._wagon_front_offsets[wi]
             s_rear  = s_front - wagon.length_mm
@@ -1088,9 +1105,10 @@ class SceneWindow(QMainWindow):
             center = (pf + pr) * 0.5
 
             t = vispy.scene.transforms.MatrixTransform()
-            t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
+            t.rotate(geom.rotation_deg, (0, 0, 1))
             t.translate(center.astype(np.float64))
             wagon_visual.transform = t
+            self._wagon_transforms.append(t)
             self._wagon_visuals.append(wagon_visual)
 
             # Axle wheel markers — sit at rail level (z_rail)
@@ -1106,6 +1124,9 @@ class SceneWindow(QMainWindow):
                     edge_color=_AXLE_EDGE, edge_width=1.5,
                 )
                 self._axle_visuals.append(m)
+
+        # Finalise z-offset array now that the loop has populated the list.
+        self._wagon_z_offsets_np = np.array(self._wagon_z_offsets, dtype=np.float64)
 
         # [4] Coupler line — one polyline through all junction points
         self._coupler_line = visuals.Line(
@@ -1187,39 +1208,50 @@ class SceneWindow(QMainWindow):
         if self._check_boundary(state, geom):
             return   # engine already paused; skip position update
 
-        # Captured during the loop so follow-mode can re-center the
-        # camera on the lead wagon without recomputing geometry.
+        # Group axes by wagon index once — O(M) instead of O(N×M).
+        axes_by_wagon: Dict[int, list] = {}
+        for ax in state.axes:
+            axes_by_wagon.setdefault(ax.wagon_index, []).append(ax)
+
+        # Vectorised wagon-centre computation ─────────────────────────────
+        s_fronts = state.s_head_mm - self._wagon_front_offsets_np        # (N,)
+        s_rears  = s_fronts - self._wagon_lengths_np                      # (N,)
+        s_mids   = (s_fronts + s_rears) * 0.5                            # (N,)
+
+        inv_len  = 1.0 / geom.length if geom.length > 0 else 0.0
+        z_rails  = geom.p1[2] + s_mids * inv_len * (geom.p2[2] - geom.p1[2])  # (N,)
+        z_centers = z_rails + self._wagon_z_offsets_np                   # (N,)
+
+        # World centres: p1 + unit_vec * s_mid, Z replaced by z_center.
+        centers = (
+            geom.p1[np.newaxis, :]
+            + geom.unit_vec[np.newaxis, :] * s_mids[:, np.newaxis]
+        ).astype(np.float64)
+        centers[:, 2] = z_centers
+
+        rotation_deg = geom.rotation_deg
+
         lead_center: Optional[np.ndarray] = None
 
-        for wi, wagon in enumerate(self._wagons):
-            s_front = state.s_head_mm - self._wagon_front_offsets[wi]
-            s_rear  = s_front - wagon.length_mm
-
-            # [2] Correct vertical placement — Mesh's base is already at
-            # local z=0, Box's centre is at local z=0; the offset stored
-            # in _wagon_z_offsets handles both cases uniformly.
-            z_rail   = geom.rail_z((s_front + s_rear) / 2.0)
-            z_offset = self._wagon_z_offsets[wi] if wi < len(self._wagon_z_offsets) else 0.0
-            z_center = z_rail + z_offset
-
-            pf     = geom.s_to_xyz_off(s_front, 0.0, z_center).astype(np.float32)
-            pr     = geom.s_to_xyz_off(s_rear,  0.0, z_center).astype(np.float32)
-            center = (pf + pr) * 0.5
-
+        for wi in range(len(self._wagons)):
+            center = centers[wi]
             if wi == 0:
-                lead_center = center
+                lead_center = center.astype(np.float32)
 
-            t = vispy.scene.transforms.MatrixTransform()
-            t.rotate(math.degrees(math.atan2(geom.unit_vec[1], geom.unit_vec[0])), (0, 0, 1))
-            t.translate(center.astype(np.float64))
-            self._wagon_visuals[wi].transform = t
+            # Reuse the cached transform — no Python object allocation per tick.
+            t = self._wagon_transforms[wi]
+            t.reset()
+            t.rotate(rotation_deg, (0, 0, 1))
+            t.translate(center)
 
             if wi < len(self._axle_visuals):
-                axle_pts = [
-                    geom.s_to_xyz_off(a.s_mm, 0.0, z_rail).astype(np.float32)
-                    for a in state.axes if a.wagon_index == wi
-                ]
-                if axle_pts:
+                wagon_axes = axes_by_wagon.get(wi)
+                if wagon_axes:
+                    z_r = float(z_rails[wi])
+                    axle_pts = [
+                        geom.s_to_xyz_off(a.s_mm, 0.0, z_r).astype(np.float32)
+                        for a in wagon_axes
+                    ]
                     self._axle_visuals[wi].set_data(
                         pos=np.array(axle_pts, dtype=np.float32),
                         size=10, face_color=_AXLE_FACE,
@@ -1329,36 +1361,40 @@ class SceneWindow(QMainWindow):
     # ================================================================== #
 
     def _coupler_points(self, s_head_mm: float, geom: _PathGeom) -> np.ndarray:
-        """Build the polyline of coupler junction points.
+        """Build the polyline of coupler junction points (vectorised).
 
         The polyline visits:
           front of wagon 0, rear of wagon 0 / front of wagon 1,
           rear of wagon 1 / front of wagon 2, … rear of last wagon.
-
-        We use wagon centres at the midpoint Z so the bar stays at roof
-        height — actually we use a coupler_z slightly above rail level.
         """
-        pts = []
-        for wi, wagon in enumerate(self._wagons):
-            s_front = s_head_mm - self._wagon_front_offsets[wi]
-            s_rear  = s_front - wagon.length_mm
-            wagon_h = wagon.height_mm if wagon.height_mm > 0 else wagon.length_mm * 0.13
-            # Place couplers at 30% wagon height above rail (below wagon mid)
-            z_coupler = geom.rail_z(s_front) + wagon_h * 0.30
-
-            front_pt = geom.s_to_xyz_off(s_front, 0.0, z_coupler).astype(np.float32)
-            rear_pt  = geom.s_to_xyz_off(s_rear,  0.0, z_coupler).astype(np.float32)
-
-            if wi == 0:
-                pts.append(front_pt)
-            pts.append(rear_pt)
-
-        if len(pts) < 2:
-            # Fallback: at least two identical points so Line doesn't error
+        n = len(self._wagons)
+        if n == 0:
             p = geom.s_to_xyz(s_head_mm).astype(np.float32)
-            pts = [p, p]
+            return np.array([p, p], dtype=np.float32)
 
-        return np.array(pts, dtype=np.float32)
+        s_fronts = s_head_mm - self._wagon_front_offsets_np   # (N,)
+        s_rears  = s_fronts - self._wagon_lengths_np          # (N,)
+
+        # One arc-length per output point: front of wagon 0, then rear of each.
+        s_all = np.empty(n + 1, dtype=np.float64)
+        s_all[0]  = s_fronts[0]
+        s_all[1:] = s_rears
+
+        # Coupler Z: rail height at each wagon's front + 30 % of body height.
+        inv_len = 1.0 / geom.length if geom.length > 0 else 0.0
+        z_rail_f   = geom.p1[2] + s_fronts * inv_len * (geom.p2[2] - geom.p1[2])
+        z_coupler  = z_rail_f + self._wagon_heights_np * 0.30  # (N,)
+
+        z_all = np.empty(n + 1, dtype=np.float64)
+        z_all[0]  = z_coupler[0]
+        z_all[1:] = z_coupler
+
+        pts = (
+            geom.p1[np.newaxis, :]
+            + geom.unit_vec[np.newaxis, :] * s_all[:, np.newaxis]
+        ).astype(np.float32)
+        pts[:, 2] = z_all.astype(np.float32)
+        return pts
 
     # ================================================================== #
     #  Control button handlers                                            #
