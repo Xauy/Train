@@ -90,6 +90,11 @@ DKP_HEAD_HALF    = GAUGE_MM * 0.18
 COUPLER_DIAMETER = GAUGE_MM * 0.08   # visual thickness represented as marker size
 _COUPLER_COLOR   = (0.70, 0.72, 0.76, 1.0)   # light steel coupler bar
 
+# Wagons are rendered 5% longer than their physical length (2.5% beyond each
+# end) so adjacent wagon bodies visually overlap at the coupler, making the
+# connection look solid rather than leaving a gap.
+_WAGON_VISUAL_OVERLAP = 0.05
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Colour palette
@@ -1070,7 +1075,7 @@ class SceneWindow(QMainWindow):
             #       • Box : centre is at local z=0 → z_base_offset = h/2
             wagon_visual, z_base_offset = self._make_wagon_visual(
                 wagon=wagon,
-                wagon_len=wagon_len,
+                wagon_len=wagon_len * (1.0 + _WAGON_VISUAL_OVERLAP),
                 wagon_w=wagon_w,
                 wagon_h=wagon_h,
             )
