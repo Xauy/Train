@@ -52,8 +52,9 @@ import numpy as np
 
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QToolBar, QMessageBox, QSizePolicy, QComboBox,
+    QPlainTextEdit, QFrame,
 )
 
 try:
@@ -121,6 +122,21 @@ _AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
 _TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
 
 _DKP_FLASH_MS   = 320
+
+# Live DKP log panel (right side of the scene window)
+_DKP_LOG_WIDTH      = 300
+_DKP_LOG_MAX_LINES    = 2000
+_DKP_LOG_PANEL_STYLE  = (
+    "QFrame#dkpLogPanel { background:#0c0e12; border-left:1px solid #252930; }"
+    "QLabel#dkpLogTitle { color:#6878a0; font-size:11px; padding:6px 8px 2px; }"
+    "QPlainTextEdit#dkpLogView { background:#0a0c10; color:#b8c8e0;"
+    "  border:none; font-family:'Courier New',monospace; font-size:11px;"
+    "  padding:4px 6px; selection-background-color:#2a3a5e; }"
+)
+_DKP_DIR_LABELS = {
+    "LeftToRight": "слева→направо",
+    "RightToLeft": "справа→налево",
+}
 
 # ── Camera controls ─────────────────────────────────────────────────────
 # Available camera modes (also the labels shown in the toolbar dropdown).
@@ -564,6 +580,11 @@ class SceneWindow(QMainWindow):
 
         self._build_toolbar()
 
+        content = QWidget()
+        content_row = QHBoxLayout(content)
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(0)
+
         self._canvas = SceneCanvas(keys="interactive", bgcolor=_BG, show=False)
         cw = self._canvas.native
         cw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -572,7 +593,13 @@ class SceneWindow(QMainWindow):
         # keyPressEvent.  Without StrongFocus, Qt's tab-only focus would
         # leave keystrokes with whichever toolbar widget has the cursor.
         cw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        root.addWidget(cw)
+        content_row.addWidget(cw, stretch=1)
+
+        self._wagon_ids_by_index = {i: w.wagon_id for i, w in enumerate(self._wagons)}
+        self._dkp_log_view = self._build_dkp_log_panel()
+        content_row.addWidget(self._dkp_log_view)
+
+        root.addWidget(content, stretch=1)
 
         self._view = self._canvas.central_widget.add_view()
         # Camera mode is mutable — start in turntable. The current mode
@@ -618,8 +645,9 @@ class SceneWindow(QMainWindow):
         # engine's expanded wagon list so the log shows human ids
         # instead of opaque indices.
         try:
-            wagon_ids = {i: w.wagon_id for i, w in enumerate(self._wagons)}
-            self._dkp_logger: Optional[DKPEventLogger] = DKPEventLogger(wagon_ids)
+            self._dkp_logger: Optional[DKPEventLogger] = DKPEventLogger(
+                self._wagon_ids_by_index,
+            )
             self._dkp_log_dir = self._dkp_logger.open()
             _LOG.info("DKP events will be logged to %s", self._dkp_log_dir)
         except OSError as exc:
@@ -634,6 +662,63 @@ class SceneWindow(QMainWindow):
     # ================================================================== #
     #  Toolbar                                                            #
     # ================================================================== #
+
+    def _build_dkp_log_panel(self) -> QFrame:
+        """Right-side panel showing DKP trigger events in real time."""
+        panel = QFrame()
+        panel.setObjectName("dkpLogPanel")
+        panel.setFixedWidth(_DKP_LOG_WIDTH)
+        panel.setStyleSheet(_DKP_LOG_PANEL_STYLE)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        title = QLabel("События ДКП")
+        title.setObjectName("dkpLogTitle")
+        layout.addWidget(title)
+
+        view = QPlainTextEdit()
+        view.setObjectName("dkpLogView")
+        view.setReadOnly(True)
+        view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        view.setPlaceholderText("Срабатывания ДКП появятся здесь во время прогона…")
+        layout.addWidget(view, stretch=1)
+
+        self._dkp_log_text = view
+        return panel
+
+    def _format_dkp_log_line(self, event: DKPEvent) -> str:
+        """One-line summary for the live log panel."""
+        wagon_id = self._wagon_ids_by_index.get(
+            event.wagon_index, f"#{event.wagon_index}",
+        )
+        dir_lbl = _DKP_DIR_LABELS.get(event.direction, event.direction)
+        stype = f" [{event.sensor_type}]" if event.sensor_type else ""
+        return (
+            f"{_fmt_time(event.t_ms)}  {event.sensor_id}{stype}  "
+            f"{wagon_id} ось {event.axle_index + 1}  {dir_lbl}  "
+            f"{event.v_mms:.0f} мм/с"
+        )
+
+    def _append_dkp_log(self, event: DKPEvent) -> None:
+        view = self._dkp_log_text
+        view.appendPlainText(self._format_dkp_log_line(event))
+        doc = view.document()
+        if doc.blockCount() > _DKP_LOG_MAX_LINES:
+            cursor = view.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(
+                cursor.MoveOperation.Down,
+                cursor.MoveMode.KeepAnchor,
+                doc.blockCount() - _DKP_LOG_MAX_LINES,
+            )
+            cursor.removeSelectedText()
+        bar = view.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _clear_dkp_log(self) -> None:
+        self._dkp_log_text.clear()
 
     def _build_toolbar(self) -> None:
         tb: QToolBar = self.addToolBar("Управление")
@@ -1290,6 +1375,8 @@ class SceneWindow(QMainWindow):
             except OSError as exc:
                 _LOG.warning("DKP log write failed: %s", exc)
 
+        self._append_dkp_log(event)
+
         bundle = self._dkp_visuals.get(event.sensor_id)
         if bundle:
             bundle.flash()
@@ -1414,6 +1501,7 @@ class SceneWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.critical(self, "Ошибка запуска", str(exc))
             return
+        self._clear_dkp_log()
         self._paused = False
         self._set_state_running()
 
