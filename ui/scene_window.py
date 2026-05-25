@@ -52,9 +52,9 @@ import numpy as np
 
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMainWindow, QWidget, QVBoxLayout,
     QLabel, QPushButton, QToolBar, QMessageBox, QSizePolicy, QComboBox,
-    QPlainTextEdit, QFrame,
+    QPlainTextEdit, QFrame, QSplitter,
 )
 
 try:
@@ -123,8 +123,9 @@ _TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
 
 _DKP_FLASH_MS   = 320
 
-# Live DKP log panel (right side of the scene window)
-_DKP_LOG_WIDTH      = 300
+# Live DKP log panel (right side of the scene window; user-resizable via splitter)
+_DKP_LOG_DEFAULT_WIDTH = 300
+_DKP_LOG_MIN_WIDTH     = 160
 _DKP_LOG_MAX_LINES    = 2000
 _DKP_LOG_PANEL_STYLE  = (
     "QFrame#dkpLogPanel { background:#0c0e12; border-left:1px solid #252930; }"
@@ -580,11 +581,6 @@ class SceneWindow(QMainWindow):
 
         self._build_toolbar()
 
-        content = QWidget()
-        content_row = QHBoxLayout(content)
-        content_row.setContentsMargins(0, 0, 0, 0)
-        content_row.setSpacing(0)
-
         self._canvas = SceneCanvas(keys="interactive", bgcolor=_BG, show=False)
         cw = self._canvas.native
         cw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -593,13 +589,23 @@ class SceneWindow(QMainWindow):
         # keyPressEvent.  Without StrongFocus, Qt's tab-only focus would
         # leave keystrokes with whichever toolbar widget has the cursor.
         cw.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        content_row.addWidget(cw, stretch=1)
 
         self._wagon_ids_by_index = {i: w.wagon_id for i, w in enumerate(self._wagons)}
-        self._dkp_log_view = self._build_dkp_log_panel()
-        content_row.addWidget(self._dkp_log_view)
+        dkp_panel = self._build_dkp_log_panel()
 
-        root.addWidget(content, stretch=1)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(5)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background:#252930; }"
+            "QSplitter::handle:hover { background:#5070a0; }"
+        )
+        splitter.addWidget(cw)
+        splitter.addWidget(dkp_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([self.width() - _DKP_LOG_DEFAULT_WIDTH, _DKP_LOG_DEFAULT_WIDTH])
+        root.addWidget(splitter, stretch=1)
 
         self._view = self._canvas.central_widget.add_view()
         # Camera mode is mutable — start in turntable. The current mode
@@ -667,7 +673,10 @@ class SceneWindow(QMainWindow):
         """Right-side panel showing DKP trigger events in real time."""
         panel = QFrame()
         panel.setObjectName("dkpLogPanel")
-        panel.setFixedWidth(_DKP_LOG_WIDTH)
+        panel.setMinimumWidth(_DKP_LOG_MIN_WIDTH)
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
+        )
         panel.setStyleSheet(_DKP_LOG_PANEL_STYLE)
 
         layout = QVBoxLayout(panel)
