@@ -92,6 +92,7 @@ class SimulationEngine(QObject):
         # Pre-expand the wagon sequence once so _tick() doesn't repeat work.
         # wagon_library maps wagon_id → WagonDef.
         self._wagons: List[WagonDef] = config.train.expand(config.wagon_library)
+        self._has_locomotive: bool = any(w.is_locomotive for w in self._wagons)
 
         # Cumulative front-face offsets of each wagon from the train head.
         # wagon_front_offset[i] = sum of lengths of wagons 0 … i-1.
@@ -406,23 +407,10 @@ class SimulationEngine(QObject):
         dt_s: float = cfg.dt_ms / 1000.0
 
         # ── Step Б: apply kinematics ───────────────────────────────────
-        # Velocity is treated as a continuous quantity that carries
-        # across ticks (and across step transitions — see Step Е).
-        # *behavior* sets the SIGN of the applied acceleration, not the
-        # sign of velocity:
-        #
-        #   LeftToRight → accel_sign = +1   (push toward +s)
-        #   RightToLeft → accel_sign = -1   (push toward -s)
-        #   Stop        → accel_sign = -sign(v)  (oppose current motion)
-        #
-        # This means a train rolling right-to-left that enters a
-        # LeftToRight step does NOT teleport its velocity to zero; it
-        # smoothly decelerates, stops, and then accelerates leftward,
-        # all under a single constant acceleration.  v_threshold caps
-        # the speed only in the direction we're being pushed, so a
-        # train decelerating against its current direction is never
-        # artificially clipped.
-        if current_step.behavior == "Stop":
+        # Without at least one locomotive in the train there is no traction.
+        if not self._has_locomotive:
+            v_new = 0.0
+        elif current_step.behavior == "Stop":
             # Decelerate toward zero by applying accel opposite to v.
             # Once v reaches zero, hold there (accel_sign becomes 0).
             if self._v_mms > 0:

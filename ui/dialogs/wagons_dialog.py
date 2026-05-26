@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QSpinBox,
 )
 from storage.wagon_repository import load_wagons, save_wagons
+from physics.wagon_defaults import supported_wagon_types
 from ui.dialogs.axle_positions_dialog import AxlePositionsDialog
 
 # Column indices
@@ -150,10 +151,7 @@ class WagonsDialog(QDialog):
 
         # QComboBox для типа вагона
         combo = QComboBox()
-        combo.addItems([
-            "Цистерна", "Крытый", "Полувагон", "Платформа",
-            "Думпкар", "Хоппер", "Транспортер"
-        ])
+        combo.addItems(supported_wagon_types())
         idx = combo.findText(data.get("type", "Цистерна"))
         combo.setCurrentIndex(max(idx, 0))
         self.table.setCellWidget(row, _COL_TYPE, combo)

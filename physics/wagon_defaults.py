@@ -36,6 +36,7 @@ How to add a default model
 | Думпкар         | ``dumpkar.obj``       |
 | Хоппер          | ``hopper.obj``        |
 | Транспортер     | ``transporter.obj``   |
+| Локомотив       | ``locomo.obj``        |
 
 If a wagon has no explicit model and no default file is present for its
 type, the scene renders the original Box fallback — nothing breaks.
@@ -59,6 +60,8 @@ MODELS_DIRNAME: str = "models"
 
 # Type → filename mapping.  Keys are the exact UI labels from the wagon-type
 # dropdown in WagonsDialog; values are the expected file names.
+LOCOMOTIVE_TYPE: str = "Локомотив"
+
 DEFAULT_MODEL_FILES: Dict[str, str] = {
     "Цистерна":    "cisterna.obj",
     "Крытый":      "kryty.obj",
@@ -67,7 +70,13 @@ DEFAULT_MODEL_FILES: Dict[str, str] = {
     "Думпкар":     "dumpkar.obj",
     "Хоппер":      "hopper.obj",
     "Транспортер": "transporter.obj",
+    LOCOMOTIVE_TYPE: "locomo.obj",
 }
+
+
+def is_locomotive_type(wagon_type: str) -> bool:
+    """Return True when *wagon_type* is the locomotive kind from the UI."""
+    return bool(wagon_type) and wagon_type.strip() == LOCOMOTIVE_TYPE
 
 
 # ─────────────────────────────────────────────────────────────────────────────

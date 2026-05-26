@@ -64,6 +64,7 @@ class WagonDef:
     height_mm:  float
     axles:      List[AxleDef]
     model_path: str = ""   # optional path to a 3-D asset (.obj); empty → fallback Box
+    is_locomotive: bool = False
 
     def __post_init__(self) -> None:
         if self.length_mm <= 0:
@@ -89,6 +90,7 @@ class WagonDef:
             "height_mm":  self.height_mm,
             "axles":      [a.to_dict() for a in self.axles],
             "model_path": self.model_path,
+            "is_locomotive": self.is_locomotive,
         }
 
     @classmethod
@@ -100,6 +102,7 @@ class WagonDef:
             height_mm=  float(d["height_mm"]),
             axles=      [AxleDef.from_dict(a) for a in d["axles"]],
             model_path= str(d.get("model_path", "")),
+            is_locomotive= bool(d.get("is_locomotive", False)),
         )
 
 
@@ -193,6 +196,7 @@ class TrainConfig:
                         height_mm=  template.height_mm,
                         axles=      mirrored_axles,
                         model_path= template.model_path,
+                        is_locomotive= template.is_locomotive,
                     ))
         return result
 

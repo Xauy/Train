@@ -131,6 +131,7 @@ _DKP_LABEL      = (0.76, 0.88, 1.00, 1.0)
 _DKP_COUNT      = (0.95, 0.95, 0.60, 1.0)   # warm yellow — axis count readout
 
 _WAGON_BODY     = (0.20, 0.33, 0.52, 1.0)
+_LOCOMOTIVE_BODY = (0.62, 0.22, 0.14, 1.0)
 _WAGON_EDGE     = (0.50, 0.68, 0.90, 0.50)
 _AXLE_FACE      = (0.95, 0.84, 0.18, 1.0)
 _AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
@@ -731,6 +732,9 @@ class SceneWindow(QMainWindow):
         self._wagon_lengths_np:       np.ndarray = np.empty(0, dtype=np.float64)
         self._wagon_heights_np:       np.ndarray = np.empty(0, dtype=np.float64)
         self._wagon_z_offsets_np:     np.ndarray = np.empty(0, dtype=np.float64)
+        self._locomotive_indices: set[int] = {
+            i for i, w in enumerate(self._wagons) if w.is_locomotive
+        }
 
         # Build static scene
         self._init_ground_grid()
@@ -1288,6 +1292,7 @@ class SceneWindow(QMainWindow):
                 wagon_len=wagon_len * (1.0 + _WAGON_VISUAL_OVERLAP),
                 wagon_w=wagon_w,
                 wagon_h=wagon_h,
+                is_locomotive=wagon.is_locomotive,
             )
             self._wagon_z_offsets.append(z_base_offset)
 
@@ -1298,7 +1303,12 @@ class SceneWindow(QMainWindow):
             center = (pf + pr) * 0.5
 
             t = vispy.scene.transforms.MatrixTransform()
-            t.rotate(geom.rotation_deg, (0, 0, 1))
+            facing_deg = self._wagon_facing_deg(
+                geom.rotation_deg,
+                self._config.train.direction,
+                wagon.is_locomotive,
+            )
+            t.rotate(facing_deg, (0, 0, 1))
             t.translate(center.astype(np.float64))
             wagon_visual.transform = t
             self._wagon_transforms.append(t)
@@ -1332,12 +1342,25 @@ class SceneWindow(QMainWindow):
     #  [5] Wagon visual factory — Mesh from .obj or Box fallback         #
     # ================================================================== #
 
+    @staticmethod
+    def _wagon_facing_deg(
+        track_rotation_deg: float,
+        travel_direction: str,
+        is_locomotive: bool,
+    ) -> float:
+        """Yaw for a wagon mesh: locomotives face the current travel direction."""
+        if not is_locomotive:
+            return track_rotation_deg
+        flip = 180.0 if travel_direction == "RightToLeft" else 0.0
+        return track_rotation_deg + flip
+
     def _make_wagon_visual(
         self,
         wagon:     WagonDef,
         wagon_len: float,
         wagon_w:   float,
         wagon_h:   float,
+        is_locomotive: bool = False,
     ):
         """Return (visual, z_base_offset) for one wagon.
 
@@ -1356,7 +1379,8 @@ class SceneWindow(QMainWindow):
         The returned visual is already parented to self._view.scene; the
         caller still needs to assign its .transform.
         """
-        base_rgb = np.array(_WAGON_BODY[:3], dtype=np.float32)
+        body_rgba = _LOCOMOTIVE_BODY if is_locomotive else _WAGON_BODY
+        base_rgb = np.array(body_rgba[:3], dtype=np.float32)
         model_path = getattr(wagon, "model_path", "") or ""
 
         if model_path:
@@ -1438,8 +1462,6 @@ class SceneWindow(QMainWindow):
         ).astype(np.float64)
         centers[:, 2] = z_centers
 
-        rotation_deg = geom.rotation_deg
-
         lead_center: Optional[np.ndarray] = None
 
         for wi in range(len(self._wagons)):
@@ -1450,7 +1472,14 @@ class SceneWindow(QMainWindow):
             # Reuse the cached transform — no Python object allocation per tick.
             t = self._wagon_transforms[wi]
             t.reset()
-            t.rotate(rotation_deg, (0, 0, 1))
+            facing_deg = self._wagon_facing_deg(
+                geom.rotation_deg,
+                # Use only the initial direction chosen on «Состав».
+                # This keeps locomotive nose orientation stable for the whole run.
+                self._config.train.direction,
+                wi in self._locomotive_indices,
+            )
+            t.rotate(facing_deg, (0, 0, 1))
             t.translate(center)
 
             if wi < len(self._axle_visuals):
@@ -1625,6 +1654,12 @@ class SceneWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.critical(self, "Ошибка запуска", str(exc))
             return
+        if not self._engine._has_locomotive:
+            QMessageBox.information(
+                self,
+                "Нет локомотива",
+                "В составе нет локомотива — поезд останется на месте.",
+            )
         self._clear_dkp_log()
         self._paused = False
         self._set_state_running()
