@@ -20,6 +20,14 @@ Changes in this version:
       all wagon junction points (rear of wagon i = front of wagon i+1).
       Updated every tick along with wagon positions.
 
+  [6] TWO-LIGHT RIG — a key light (warm white, upper-left-front) and a fill
+      light (cool blue, lower-right-rear) are baked into per-vertex colours
+      using Phong shading equations (_two_light_vertex_colors).  Both OBJ
+      meshes and the box fallback use this: the box is now a visuals.Mesh
+      built by _box_mesh_with_normals() rather than a flat visuals.Box.
+      No VisPy lighting API is involved — the result is guaranteed correct
+      regardless of VisPy version.
+
   [5] OBJ 3-D MODELS — if a wagon's WagonDef has a non-empty model_path
       that points to a readable .obj file, the wagon is rendered as a
       VisPy Mesh built from that file's geometry.  The mesh is:
@@ -74,7 +82,15 @@ except ImportError as _err:
 from physics.models import SimConfig, SimState, DKPEvent, WagonDef, DKPConfig
 from physics.simulation_engine import SimulationEngine
 from physics.dkp_logger import DKPEventLogger
+from vispy.visuals.text import TextVisual
 
+_old_init = TextVisual.__init__
+
+def _new_init(self, *args, **kwargs):
+    kwargs.setdefault("face", "Arial")
+    _old_init(self, *args, **kwargs)
+
+TextVisual.__init__ = _new_init
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Track geometry constants  (mm)
@@ -122,6 +138,91 @@ _AXLE_EDGE      = (1.00, 1.00, 1.00, 0.45)
 _TRACK_LABEL    = (0.60, 0.72, 0.94, 1.0)
 
 _DKP_FLASH_MS   = 320
+
+# ── Lighting ──────────────────────────────────────────────────────────────────
+# Two directional lights are baked into per-vertex colours at mesh-build time.
+# This avoids any reliance on VisPy's internal lighting API.
+# Key light  : warm white from upper-left-front.
+# Fill light : cool blue from lower-right-rear.
+_LIGHT_KEY_DIR    = np.array([ 1.0,  0.5,  1.0], dtype=np.float32)
+_LIGHT_KEY_COLOR  = np.array([1.00, 0.97, 0.92], dtype=np.float32)
+_LIGHT_KEY_SPEC   = 0.35
+_LIGHT_FILL_DIR   = np.array([-1.0, -0.5, -0.4], dtype=np.float32)
+_LIGHT_FILL_COLOR = np.array([0.35, 0.42, 0.60], dtype=np.float32)
+_LIGHT_FILL_SPEC  = 0.0
+_LIGHT_AMBIENT    = np.array([0.12, 0.12, 0.14], dtype=np.float32)
+
+
+def _two_light_vertex_colors(
+    vertices:  np.ndarray,
+    normals:   np.ndarray,
+    base_rgb:  np.ndarray,
+    shininess: float = 32.0,
+) -> np.ndarray:
+    """Return (N, 4) RGBA vertex colours using two-light Phong shading.
+
+    Lights are baked into vertex colours — no VisPy lighting API involved.
+    Key light (warm white, upper-left-front) + fill light (cool blue,
+    lower-right-rear) + constant ambient.
+    """
+    def _norm(v):
+        n = np.linalg.norm(v)
+        return v / n if n > 1e-9 else v
+
+    key_dir  = _norm(_LIGHT_KEY_DIR.copy())
+    fill_dir = _norm(_LIGHT_FILL_DIR.copy())
+
+    d_key  = np.clip(normals @ key_dir,  0.0, 1.0)[:, None]
+    d_fill = np.clip(normals @ fill_dir, 0.0, 1.0)[:, None]
+
+    view_dir = _norm(np.array([0.0, 0.0, 1.0], dtype=np.float32))
+    half_key = _norm(key_dir + view_dir)
+    s_key    = np.clip(normals @ half_key, 0.0, 1.0)[:, None] ** shininess
+
+    colour = (
+        _LIGHT_AMBIENT
+        + d_key  * _LIGHT_KEY_COLOR  * base_rgb + s_key * _LIGHT_KEY_SPEC
+        + d_fill * _LIGHT_FILL_COLOR * base_rgb
+    )
+    colour = np.clip(colour, 0.0, 1.0)
+    alpha  = np.ones((len(vertices), 1), dtype=np.float32)
+    return np.hstack([colour, alpha]).astype(np.float32)
+
+
+def _box_mesh_with_normals(
+    length: float, height: float, depth: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (vertices, faces, normals) for an axis-aligned box centred at origin.
+
+    24 vertices (4 per face × 6 faces) so each face gets its own flat normal.
+    X = length (forward), Y = depth (lateral), Z = height (up).
+    """
+    hx, hy, hz = length / 2.0, depth / 2.0, height / 2.0
+    face_normals = np.array([
+        [ 1,  0,  0], [-1,  0,  0],
+        [ 0,  1,  0], [ 0, -1,  0],
+        [ 0,  0,  1], [ 0,  0, -1],
+    ], dtype=np.float32)
+    face_verts = [
+        [[ hx,-hy,-hz],[ hx, hy,-hz],[ hx, hy, hz],[ hx,-hy, hz]],
+        [[-hx, hy,-hz],[-hx,-hy,-hz],[-hx,-hy, hz],[-hx, hy, hz]],
+        [[ hx, hy,-hz],[-hx, hy,-hz],[-hx, hy, hz],[ hx, hy, hz]],
+        [[-hx,-hy,-hz],[ hx,-hy,-hz],[ hx,-hy, hz],[-hx,-hy, hz]],
+        [[-hx,-hy, hz],[ hx,-hy, hz],[ hx, hy, hz],[-hx, hy, hz]],
+        [[ hx,-hy,-hz],[-hx,-hy,-hz],[-hx, hy,-hz],[ hx, hy,-hz]],
+    ]
+    verts_list, norms_list, faces_list, base = [], [], [], 0
+    for fi, fv in enumerate(face_verts):
+        v = np.array(fv, dtype=np.float32)
+        verts_list.append(v)
+        norms_list.append(np.tile(face_normals[fi], (4, 1)))
+        faces_list += [[base, base+1, base+2], [base, base+2, base+3]]
+        base += 4
+    return (
+        np.vstack(verts_list),
+        np.array(faces_list, dtype=np.uint32),
+        np.vstack(norms_list),
+    )
 
 # Live DKP log panel (right side of the scene window; user-resizable via splitter)
 _DKP_LOG_DEFAULT_WIDTH = 300
@@ -613,7 +714,6 @@ class SceneWindow(QMainWindow):
         # the keyboard-step dispatcher.
         self._cam_mode: str = _CAM_MODE_TURNTABLE
         self._apply_camera_mode(_CAM_MODE_TURNTABLE)
-
         # Runtime-updated scene objects
         self._dkp_visuals:   Dict[str, _DKPVisual] = {}
         # Each entry is either a visuals.Box (fallback) or a visuals.Mesh (OBJ).
@@ -637,7 +737,6 @@ class SceneWindow(QMainWindow):
         self._init_tracks()
         self._init_dkp_markers()
         self._init_wagon_visuals()
-
         self._view.camera.set_range()
 
         engine.tick_updated.connect(self._on_tick)
@@ -1257,6 +1356,7 @@ class SceneWindow(QMainWindow):
         The returned visual is already parented to self._view.scene; the
         caller still needs to assign its .transform.
         """
+        base_rgb = np.array(_WAGON_BODY[:3], dtype=np.float32)
         model_path = getattr(wagon, "model_path", "") or ""
 
         if model_path:
@@ -1265,29 +1365,44 @@ class SceneWindow(QMainWindow):
                 verts_raw, faces = mesh_data
                 verts = _orient_and_scale_obj(verts_raw, target_length_mm=wagon_len)
                 try:
+                    # Compute smooth per-vertex normals from the face topology.
+                    face_vecs = verts[faces]                          # (F,3,3)
+                    e1 = face_vecs[:, 1] - face_vecs[:, 0]
+                    e2 = face_vecs[:, 2] - face_vecs[:, 0]
+                    fn = np.cross(e1, e2)                             # (F,3)
+                    vn = np.zeros_like(verts)
+                    for i in range(3):
+                        np.add.at(vn, faces[:, i], fn)
+                    lens = np.linalg.norm(vn, axis=1, keepdims=True)
+                    vn /= np.where(lens > 1e-9, lens, 1.0)
+
+                    vertex_colors = _two_light_vertex_colors(verts, vn, base_rgb)
                     mesh = visuals.Mesh(
                         vertices=verts,
                         faces=faces,
-                        color=(*_WAGON_BODY[:3], 1.0),
-                        shading="smooth",
+                        vertex_colors=vertex_colors,
                         parent=self._view.scene,
                     )
-                    # Mesh base already at local z=0 — no extra lift needed.
                     return mesh, 0.0
                 except Exception as exc:
                     _LOG.warning(
                         "VisPy Mesh construction failed for %s (%s); "
-                        "using Box fallback.",
+                        "using box fallback.",
                         model_path, exc,
                     )
 
-        # Fallback — original Box rendering, centred at local origin.
-        box = visuals.Box(
-            width=wagon_len, height=wagon_h, depth=wagon_w,
-            color=(*_WAGON_BODY[:3], 0.85), edge_color=_WAGON_EDGE,
+        # Box fallback — build as a Mesh with baked two-light vertex colours.
+        # This replaces the flat-shaded visuals.Box so both wagon types benefit
+        # from the same two-light rig.
+        verts, faces, normals = _box_mesh_with_normals(wagon_len, wagon_h, wagon_w)
+        vertex_colors = _two_light_vertex_colors(verts, normals, base_rgb)
+        mesh = visuals.Mesh(
+            vertices=verts,
+            faces=faces,
+            vertex_colors=vertex_colors,
             parent=self._view.scene,
         )
-        return box, wagon_h / 2.0
+        return mesh, wagon_h / 2.0
 
     # ================================================================== #
     #  Engine signal handlers                                             #
